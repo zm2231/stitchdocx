@@ -178,6 +178,32 @@ describe("mid-container inserts keep the previous form", () => {
     expect(paras.map((p) => p.text)).toEqual(["Anchor paragraph.", "Next paragraph."]);
   });
 
+  it("a mid-container insert's anchor stays byte-verified", () => {
+    const body = P("10000000", `<w:pPr><w:jc w:val="left"/></w:pPr>` + R("Anchor paragraph.")) + P("10000001", R("Next paragraph."));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const receipts = doc.apply([insert("10000000", "Inserted.")], { date: DATE });
+    const out = doc.save();
+    expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    // the mid-container form never touches the anchor: a formatting tamper
+    // on it must fail verification even though an op addressed the paragraph
+    const entries = readPackage(out);
+    const xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    entries.set("word/document.xml", encodePart(xml.replace('<w:jc w:val="left"/>', '<w:jc w:val="center"/>')));
+    expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
+  });
+
+  it("a span edit and an insert sharing one anchor verify consistently", () => {
+    const body = P("10000000", `<w:pPr><w:jc w:val="left"/></w:pPr>` + R("Payments are due net-30.")) + P("10000001", R("Next paragraph."));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const receipts = doc.apply([
+      { op: "replace", ref: "r", author: AUTHOR, addr: "10000000", start: 15, end: 21, expectText: "net-30", text: "net-45" },
+      insert("10000000", "Inserted."),
+    ], { date: DATE });
+    expect(verifyOutput(norm, doc.save(), receipts).ok).toBe(true);
+  });
+
   it("a paragraph whose mark is already tracked can still be rejected by merge", () => {
     // pre-existing tracked insert (client redline): mark on the new paragraph, mid-container
     const body = P("10000000", R("Anchor.")) + P("10000002", `<w:pPr><w:rPr><w:ins w:id="7" w:author="Client Author" w:date="${DATE}"/></w:rPr></w:pPr><w:ins w:id="8" w:author="Client Author" w:date="${DATE}">` + R("Their clause.") + `</w:ins>`) + P("10000001", R("Next."));

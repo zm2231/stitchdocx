@@ -4,7 +4,7 @@
 // differs. Tampering anywhere fails.
 import { decodeEntities, decodePart, readPackage, parseXml, kid, serializeXml } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
-import { acceptAll, paragraphText, projectParagraphs, type View } from "./projection.js";
+import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, type View } from "./projection.js";
 import type { Addr, Receipt } from "./types.js";
 
 export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts: Receipt[]): { ok: boolean; failures: string[] } {
@@ -75,9 +75,18 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
   // paragraph accounting: original paragraphs all present; untouched ones
   // byte-identical (text checks alone would pass a formatting tamper — the
   // anchor-mark insert form saves and restores full paragraph properties, so
-  // untouched-ness is checked at the serialized-node level). Insert anchors
-  // count as touched: the container-end form tracks the anchor's own mark.
-  const touchedAddrs = new Set<Addr>(applied.map((r) => r.addr));
+  // untouched-ness is checked at the serialized-node level). An insert's
+  // anchor counts as touched ONLY when the receipt's revisions actually reach
+  // it — the container-end form tracks the anchor's own mark; mid-container
+  // and table-scope inserts leave the anchor byte-identical.
+  const touchedAddrs = new Set<Addr>(applied.filter((r) => !r.insertedAddr).map((r) => r.addr));
+  for (const r of applied) {
+    if (!r.insertedAddr) continue;
+    const anchor = outById.get(r.addr);
+    const mark = anchor ? markRevision(anchor.node) : null;
+    const markId = mark ? attrVal(mark, "w:id") : null;
+    if (markId !== null && (r.changeIds ?? []).map(String).includes(markId)) touchedAddrs.add(r.addr);
+  }
   const expectedCount = origRecords.length + insertAddrs.size;
   if (outRecords.length !== expectedCount) failures.push(`output has ${outRecords.length} paragraphs, expected ${expectedCount}`);
   for (let i = 0; i < origRecords.length; i++) {
