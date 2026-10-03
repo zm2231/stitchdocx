@@ -1,0 +1,85 @@
+// The word-diff contract: applying wordEdits(old, new) to old must reproduce
+// new exactly, and every matched part must be an exact substring of the old
+// text at the offset the edit coordinates assume. A diff that ignores
+// whitespace when matching (jsdiff's diffWords) violates both and silently
+// drops a leading space from insertions after the last old token.
+import { describe, expect, it } from "vitest";
+import { wordEdits } from "./worddiff.js";
+
+/** rebuild newText from oldText + edits; the slices taken between edit
+ *  coordinates are exactly the matched parts, so this asserts both contract
+ *  halves: matched parts are old substrings at the assumed offsets, and the
+ *  edits reproduce newText */
+function reconstruct(oldText: string, newText: string): string {
+  let out = "";
+  let off = 0;
+  for (const e of wordEdits(oldText, newText)) {
+    if (e.insAt !== undefined) {
+      if (e.insAt < off) throw new Error(`insertion at ${e.insAt} precedes consumed offset ${off}`);
+      out += oldText.slice(off, e.insAt);
+      out += e.insText ?? "";
+      off = e.insAt;
+    }
+    if (e.delStart !== undefined && e.delEnd !== undefined) {
+      if (e.delStart < off) throw new Error(`deletion ${e.delStart}..${e.delEnd} precedes consumed offset ${off}`);
+      out += oldText.slice(off, e.delStart);
+      off = e.delEnd;
+    }
+  }
+  return out + oldText.slice(off);
+}
+
+describe("wordEdits contract", () => {
+  it("keeps the space when text is added after the last old token", () => {
+    // the reported defect: "(Week 5)days" / "within ten (10)days"
+    expect(reconstruct("(Week 4)", "(Week 5) days")).toBe("(Week 5) days");
+    expect(reconstruct("(Week 4)", "within ten (10) days")).toBe("within ten (10) days");
+    expect(reconstruct("(Week 4)", "ten days")).toBe("ten days");
+    expect(reconstruct("(Week 4)", "a b")).toBe("a b");
+  });
+
+  it("strikes only changed tokens when wording is preserved", () => {
+    const edits = wordEdits("net-30 days", "net-45 days");
+    // tokens attach leading whitespace, so the deletion covers "30" and the
+    // insertion "45" lands before the shared " days" — applying both
+    // reproduces "net-45 days"
+    expect(edits).toEqual([
+      { delStart: 4, delEnd: 6 },
+      { insAt: 6, insText: "45" },
+    ]);
+  });
+
+  it("handles identical text, empty old and empty new", () => {
+    expect(wordEdits("same", "same")).toEqual([]);
+    expect(reconstruct("", "inserted")).toBe("inserted");
+    expect(reconstruct("removed", "")).toBe("");
+  });
+
+  it("matches the contract on 10,000 random old/new pairs", { timeout: 60_000 }, () => {
+    const TOKENS = [
+      "alpha", "Bravo", "$12,500", "net-30", "Client", "deliverables", "within ten (10) days",
+      "§4.2", "“quoted”", "é", "\u00A0", " ", "  ", "\t", "\n", "(", ")", ".", ",", "x", "Q5", "2026",
+    ];
+    let seed = 42;
+    const rnd = (): number => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const pick = (a: string[]): string => a[Math.floor(rnd() * a.length)]!;
+    const gen = (): string => Array.from({ length: 1 + Math.floor(rnd() * 6) }, () => pick(TOKENS)).join("");
+    for (let i = 0; i < 10_000; i++) {
+      const oldText = gen();
+      let newText = gen();
+      if (rnd() < 0.5) {
+        const at = Math.floor(rnd() * (oldText.length + 1));
+        newText = oldText.slice(0, at) + pick(TOKENS) + oldText.slice(at);
+      }
+      let recon: string;
+      try {
+        recon = reconstruct(oldText, newText);
+      } catch (err) {
+        throw new Error(`pair ${i}: ${JSON.stringify({ oldText, newText })}: ${String(err)}`);
+      }
+      if (recon !== newText) {
+        throw new Error(`pair ${i}: reconstruction ${JSON.stringify(recon)} != ${JSON.stringify(newText)} (old ${JSON.stringify(oldText)})`);
+      }
+    }
+  });
+});
