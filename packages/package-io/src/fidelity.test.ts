@@ -75,8 +75,11 @@ d("D1 parser spike" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"
       }
     }
     console.log(`fidelity: ${parts - bad.length}/${parts} parts byte-identical (${(bytes / 1024).toFixed(0)} KiB)`);
-    // pinned denominator: a regression in fixture discovery or part selection must fail loudly
-    expect(parts).toBe(400);
+    // pinned denominator: a regression in fixture discovery or part selection
+    // must fail loudly. The number tracks the acceptance fixture corpus and is
+    // bumped when the corpus grows (400 parts before the two insert-form
+    // fixtures were added).
+    expect(parts).toBe(414);
     expect(bad).toEqual([]);
   });
 
