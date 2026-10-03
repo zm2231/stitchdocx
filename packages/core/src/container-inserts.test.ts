@@ -1,6 +1,6 @@
-// Regression tests for the real-document evaluation findings (D1): an
+// Regression tests for insertParagraphAfter markup and resolution: an
 // inserted paragraph at the end of a container must use Word's anchor-mark
-// form so Reject All can remove it, and the engine's own decide/verify must
+// form so Reject All can remove it, and the engine's decide/verify must
 // handle both that form and the mid-container form.
 import { describe, expect, it } from "vitest";
 import { encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
@@ -41,7 +41,7 @@ function paraXml(xml: string, paraId: string): string {
 
 const insert = (addr: string, text: string): Op => ({ op: "insertParagraphAfter", ref: "ins", author: AUTHOR, addr, text });
 
-describe("D1: inserted paragraph at the end of a container", () => {
+describe("inserted paragraph at the end of a container", () => {
   // the anchor 10000000 is the LAST paragraph of the body
   const BODY_END = P("10000001", R("Earlier paragraph.")) + P("10000000", R("Final heading."));
 
@@ -164,7 +164,7 @@ describe("D1: inserted paragraph at the end of a container", () => {
   });
 });
 
-describe("D1: mid-container inserts keep the previous form", () => {
+describe("mid-container inserts keep the previous form", () => {
   const MID = P("10000000", R("Anchor paragraph.")) + P("10000001", R("Next paragraph."));
 
   it("tracks the new paragraph's own mark and reject removes the paragraph", () => {
@@ -187,7 +187,7 @@ describe("D1: mid-container inserts keep the previous form", () => {
   });
 });
 
-describe("D1: verify catches formatting tamper on untouched paragraphs", () => {
+describe("verify catches formatting tamper on untouched paragraphs", () => {
   it("fails when an untouched paragraph's properties are altered", () => {
     const body = P("10000001", R("Payments are due net-30.")) + P("10000000", `<w:pPr><w:jc w:val="left"/></w:pPr>` + R("Untouched."));
     const { docx: norm } = normalizeDocx(docx(body));

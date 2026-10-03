@@ -5,6 +5,6 @@ export default defineConfig({
   format: ["esm"],
   outDir: "dist",
   target: "node18",
-  // fully self-contained: the harness invokes dist/cli.js directly
+  // fully self-contained: dist/cli.js runs standalone
   noExternal: [/@stitchdocx\//, "diff", "fflate"],
 });

@@ -1,5 +1,6 @@
-// Regression tests for the round-1 review findings — one test per ledger
-// Accept check. Builders construct minimal OOXML packages in-memory.
+// Regression tests for tracked-change resolution, verification and
+// wire-binding behavior. Builders construct minimal OOXML packages
+// in-memory.
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
@@ -30,7 +31,7 @@ function runOn(bodyXml: string, ops: Op[]): { receipts: Receipt[]; out: Uint8Arr
   return { receipts, out: doc.save() };
 }
 
-describe("review round 1 regression tests", () => {
+describe("tracked-change regression tests", () => {
   it("M1: two zero-length replacements at one offset become sibling ins revisions with independent receipts", () => {
     const body = P("10000001", R("Payments begin on the start date."));
     const { docx: norm } = normalizeDocx(docx(body));
@@ -93,14 +94,14 @@ describe("review round 1 regression tests", () => {
     expect(Buffer.from(doc.save()).equals(Buffer.from(before))).toBe(true);
   });
 
-  it("RM1: CR/CRLF in text projects LF-normalized like the oracle", () => {
+  it("CR/CRLF in text projects LF-normalized like the spec parser", () => {
     const body = P("10000001", `<w:r><w:t>A\r\nB\rC</w:t></w:r>`);
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     expect(doc.projection()[0]!.text).toBe("A\nB\nC");
   });
 
-  it("RM3: normalize reassigns duplicate paraIds deterministically and stays idempotent", () => {
+  it("normalize reassigns duplicate paraIds deterministically and stays idempotent", () => {
     const body = P("10000001", R("one")) + P("10000001", R("two"));
     const first = normalizeDocx(docx(body));
     expect(first.assigned).toBe(1); // the duplicate reassigned
@@ -111,13 +112,13 @@ describe("review round 1 regression tests", () => {
     expect(Buffer.from(second.docx).equals(Buffer.from(first.docx))).toBe(true);
   });
 
-  it("RM4: paragraphs never emits an empty addr, even pre-normalization (CLI path)", () => {
+  it("paragraphs never emits an empty addr, even pre-normalization (CLI path)", () => {
     const { docx: normalized } = normalizeDocx(docx(P(null, R("no id here"))));
     const doc = openDocument(normalized);
     for (const p of doc.projection()) expect(p.addr).toMatch(/^[0-9A-F]{8}$/);
   });
 
-  it("V1: verify rejects author tampering on a receipt revision", () => {
+  it("verify rejects author tampering on a receipt revision", () => {
     const body = P("10000001", R("Hold harmless the indemnified party under all claims."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -133,7 +134,7 @@ describe("review round 1 regression tests", () => {
     expect(verifyOutput(norm, tampered, receipts).ok).toBe(false);
   });
 
-  it("V2: acceptWith on an insertion-only edit inserts the caller wording", () => {
+  it("acceptWith on an insertion-only edit inserts the caller wording", () => {
     const body = P("10000001", R("Payments begin on the start date."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -146,7 +147,7 @@ describe("review round 1 regression tests", () => {
     expect(xml).not.toContain("Reviewer A");
   });
 
-  it("V3: decide resolves move and property-change revisions by exact author, leaving others untouched", () => {
+  it("decide resolves move and property-change revisions by exact author, leaving others untouched", () => {
     const body = P("10000001",
       `<w:moveFrom w:id="90" w:author="Ours [legacy]" w:date="${DATE}">` + R("gone") + `</w:moveFrom>` +
       `<w:moveFrom w:id="92" w:author="Client Author" w:date="${DATE}">` + R("theirs") + `</w:moveFrom>` +
@@ -160,7 +161,7 @@ describe("review round 1 regression tests", () => {
     expect(xml).toContain("gone"); // reject moveFrom restores the text
   });
 
-  it("V3: exact-author decisions resolve moveTo and pPrChange and are idempotent", () => {
+  it("exact-author decisions resolve moveTo and pPrChange and are idempotent", () => {
     const body = P("10000001",
       `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="94" w:author="Ours [legacy]" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` +
       `<w:moveTo w:id="93" w:author="Ours [legacy]" w:date="${DATE}">` + R("moved") + `</w:moveTo>` + R("stay"));
@@ -176,7 +177,7 @@ describe("review round 1 regression tests", () => {
     expect(xml).not.toContain("Ours [legacy]");
   });
 
-  it("V4: decide accepts changeIds-based decisions and returns receipts", () => {
+  it("decide accepts changeIds-based decisions and returns receipts", () => {
     const body = P("10000001", R("The fee is due."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -188,7 +189,7 @@ describe("review round 1 regression tests", () => {
     expect(doc2.projection()[0]!.text).toBe("The fee is due.");
   });
 
-  it("P1: engine-authored text with XML-invalid characters is sanitized", () => {
+  it("engine-authored text with XML-invalid characters is sanitized", () => {
     const body = P("10000001", R("Rate card:"));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -199,7 +200,7 @@ describe("review round 1 regression tests", () => {
     expect(xml).not.toMatch(/\r/);
   });
 
-  it("S03 word-diff offsets: pure insertion keeps old offsets", () => {
+  it("word-diff offsets: pure insertion keeps old offsets", () => {
     const edits = wordEdits("Sessions not used within the month are forfeited.", "Sessions not used within the month roll over once and are then forfeited.");
     expect(edits).toEqual([
       { insAt: 35, insText: "roll over once and " },
@@ -207,7 +208,7 @@ describe("review round 1 regression tests", () => {
     ]);
   });
 
-  it("RM2: a point inside a field result refuses span_in_field", () => {
+  it("a point inside a field result refuses span_in_field", () => {
     const body = P("10000001",
       R("generated on ") +
       `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
@@ -222,7 +223,7 @@ describe("review round 1 regression tests", () => {
     expect(issue?.reason).toBe("span_in_field");
   });
 
-  it("RM2: a point inside an inline content control refuses span_in_content_control", () => {
+  it("a point inside an inline content control refuses span_in_content_control", () => {
     const body = P("10000001",
       R("Effective date: ") +
       `<w:sdt><w:sdtPr><w:alias w:val="d"/></w:sdtPr><w:sdtContent>` + R("October 1, 2026") + `</w:sdtContent></w:sdt>`);
@@ -235,7 +236,7 @@ describe("review round 1 regression tests", () => {
     expect(issue?.reason).toBe("span_in_content_control");
   });
 
-  it("RM2: a point at a pre-existing client revision refuses span_overlaps_revision even with a matching author", () => {
+  it("a point at a pre-existing client revision refuses span_overlaps_revision even with a matching author", () => {
     const body = P("10000001",
       R("Payment terms: ") +
       `<w:ins w:id="50" w:author="Reviewer A [clientlookalike]" w:date="${DATE}">` + R("net sixty") + `</w:ins>` + R("."));
@@ -254,7 +255,7 @@ describe("review round 1 regression tests", () => {
     expect(receipts[0]!.reason).toBe("span_overlaps_revision");
   });
 
-  it("RM2: attribute values normalize literal CR/CRLF/TAB like the spec parser (author parity)", () => {
+  it("attribute values normalize literal CR/CRLF/TAB like the spec parser (author parity)", () => {
     const body = `<w:p w14:paraId="10000001">` +
       `<w:ins w:id="7" w:author="Reviewer
 A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
@@ -265,7 +266,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(text).toBe(" tail"); // the wrapped-author insertion is recognized and rejected
   });
 
-  it("RM6: revision ownership does not leak across separate apply calls", () => {
+  it("revision ownership does not leak across separate apply calls", () => {
     const body = P("10000001", R("Payments begin on the start date."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -277,7 +278,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(receipts[0]!.reason).toBe("span_overlaps_revision");
   });
 
-  it("V1: swapping authors between two flags fails verify", () => {
+  it("swapping authors between two flags fails verify", () => {
     const body = P("10000001", R("Alpha beta gamma delta."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -295,7 +296,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
   });
 
-  it("V2: insertion-only caller wording inside a hyperlink stays in place", () => {
+  it("insertion-only caller wording inside a hyperlink stays in place", () => {
     const body = P("10000001", R("A") + `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1">` + R("BC") + `</w:hyperlink>` + R("D"));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
@@ -304,7 +305,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(doc.projection()[0]!.text).toBe("ABYCD");
   });
 
-  it("V3: rejecting a property change restores the saved props (no merge)", () => {
+  it("rejecting a property change restores the saved props (no merge)", () => {
     const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Ours [legacy]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));
     doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
