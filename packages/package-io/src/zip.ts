@@ -118,4 +118,3 @@ export function decodePart(bytes: Uint8Array): string {
 export function encodePart(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
-

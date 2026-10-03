@@ -5,7 +5,7 @@
 //
 // One walker serves two consumers: paragraphText (projection) and the span
 // map (mutation input), so text and offsets can never disagree.
-import { decodeEntities, decodeText, kid, kids, type XElement } from "@stitchdocx/package-io";
+import { decodeAttrValue, decodeText, kid, kids, type XElement } from "@stitchdocx/package-io";
 import { walkBody, type BodyContext, type BodyWalk } from "./body.js";
 
 export const REVISION_NAMES = new Set(["w:ins", "w:del", "w:moveFrom", "w:moveTo"]);
@@ -20,7 +20,7 @@ const isInsertion = (name: string) => name === "w:ins" || name === "w:moveTo";
 
 export function attrVal(el: XElement, name: string): string | null {
   const a = el.attrs.find((x) => x.name === name);
-  return a ? decodeEntities(a.raw) : null;
+  return a ? decodeAttrValue(a.raw) : null;
 }
 
 export function visibleRev(rev: XElement, view: View): boolean {

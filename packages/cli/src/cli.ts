@@ -59,8 +59,8 @@ try {
           results.push({ flagId: d.flagId, author: d.author, decision: "accept", resolved });
         } else {
           const engineDecision: RevisionDecision = { author: d.author, decision: d.decision };
-          const receipts = doc.decide([engineDecision]);
-          const resolved = receipts.reduce((n, r) => n + r.changeIds.length, 0);
+          const decided = doc.decide([engineDecision]);
+          const resolved = decided.reduce((n, r) => n + r.changeIds.length, 0);
           results.push({ flagId: d.flagId, author: d.author, decision: d.decision, resolved });
         }
       }

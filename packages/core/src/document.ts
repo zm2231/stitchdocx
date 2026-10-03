@@ -22,7 +22,7 @@ import { acceptAll, paragraphText, projectParagraphs, REVISION_NAMES, type Proje
 import { executeApply, type ApplyDeps } from "./ops.js";
 import { ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
-import type { Addr, Decision, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
+import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
 
 const OUR_AUTHOR_PREFIX = "Scope Optimizer";
 
@@ -39,6 +39,8 @@ export class Document {
   private paraIds: ParaIdAllocator;
   private originalBytes: Uint8Array;
   private dirty = false;
+  /** revision elements created by this Document instance's apply calls */
+  private ownedRevisions = new Set<XElement>();
   private numbering?: NumberingModel;
 
   private constructor(bytes: Uint8Array) {
@@ -101,6 +103,7 @@ export class Document {
       ids: this.ids,
       paraIds: this.paraIds,
       date: opts.date,
+      ownedRevisions: this.ownedRevisions,
     };
     const receipts = executeApply(deps, ops);
     if (receipts.some((r) => r.status === "applied")) this.markDirty();
@@ -124,11 +127,11 @@ export class Document {
 
   /**
    * Pure accept/reject of revisions, by changeIds or by author
-   * (research/04 §3). Returns one receipt per decision with the change ids it
+   * (research/04 §3). Returns one result per decision with the change ids it
    * resolved. The model must be saved by the caller.
    */
-  decide(decisions: RevisionDecision[]): Receipt[] {
-    return decisions.map((d, index): Receipt => {
+  decide(decisions: RevisionDecision[]): DecisionResult[] {
+    return decisions.map((d, index): DecisionResult => {
       const matched = [...allRevisions(this.root)].filter((rev) => {
         if ("changeIds" in d) {
           const id = getAttr(rev, "w:id");
@@ -139,7 +142,7 @@ export class Document {
       const ids = matched.map((rev) => getAttr(rev, "w:id") ?? "").filter((s) => s !== "");
       const resolved = resolveRevisions(this.root, (rev) => matched.includes(rev), d.decision);
       if (resolved > 0) this.markDirty();
-      return { index, status: "applied", addr: "", flagId: "", changeIds: ids };
+      return { index, decision: d.decision, changeIds: ids };
     });
   }
 
@@ -210,20 +213,22 @@ export class Document {
         continue;
       }
       // insertion-only edits (empty-span replace): the member wording takes the
-      // insertion's place — no deletion to restore
+      // insertion's place, in the insertion's own parent (which may be a
+      // hyperlink rather than the paragraph)
       if (rec.dels.length === 0 && rec.ins.length > 0) {
-        const anchored = rec.ins.find((ins) => para.children.includes(ins)) ?? rec.ins[0]!;
+        const anchored = rec.ins[0]!;
+        const parent = anchored.parent ?? para;
         const rPr = cloneFirstRunPrFrom(anchored);
-        let insertAt = para.children.indexOf(anchored);
-        if (insertAt < 0) insertAt = para.children.length;
+        let insertAt = parent.children.indexOf(anchored);
+        if (insertAt < 0) insertAt = parent.children.length;
         for (const ins of rec.ins) {
-          const i = para.children.indexOf(ins);
-          if (i >= 0) para.children.splice(i, 1);
-          else if (ins.parent) removeChildEl(ins.parent, ins);
+          const holder = ins.parent ?? para;
+          const i = holder.children.indexOf(ins);
+          if (i >= 0) holder.children.splice(i, 1);
         }
         const run = makeRun(rPr, textToRunChildren(decision.text!));
-        para.children.splice(Math.min(insertAt, para.children.length), 0, run);
-        run.parent = para;
+        parent.children.splice(Math.min(insertAt, parent.children.length), 0, run);
+        run.parent = parent;
         touched++;
         continue;
       }

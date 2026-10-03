@@ -8,6 +8,7 @@ import { encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
 import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt } from "./index.js";
 import { buildSpanMap, checkSpan } from "./spanmap.js";
 import { wordEdits } from "./worddiff.js";
+import { paragraphText } from "./projection.js";
 
 const HANDOFF = process.env.STITCH_HANDOFF ?? join(homedir(), "Downloads", "scope-docx-engine-handoff");
 
@@ -190,5 +191,100 @@ describe("review round 1 regression tests", () => {
       { insAt: 35, insText: "roll over once and " },
       { insAt: 39, insText: "then " },
     ]);
+  });
+
+  it("RM2: a point inside a field result refuses span_in_field", () => {
+    const body = P("10000001",
+      R("generated on ") +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      R("October 3, 2026") +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>`);
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const para = doc.projectionRecords()[0]!;
+    const map = buildSpanMap(para.node, () => "accept");
+    const at = para.text.indexOf("October 3") + 2;
+    const issue = checkSpan(map, at, at, []);
+    expect(issue?.reason).toBe("span_in_field");
+  });
+
+  it("RM2: a point inside an inline content control refuses span_in_content_control", () => {
+    const body = P("10000001",
+      R("Effective date: ") +
+      `<w:sdt><w:sdtPr><w:alias w:val="d"/></w:sdtPr><w:sdtContent>` + R("October 1, 2026") + `</w:sdtContent></w:sdt>`);
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const para = doc.projectionRecords()[0]!;
+    const map = buildSpanMap(para.node, () => "accept");
+    const at = para.text.indexOf("October 1") + 2;
+    const issue = checkSpan(map, at, at, []);
+    expect(issue?.reason).toBe("span_in_content_control");
+  });
+
+  it("RM2: a point at a pre-existing client revision refuses span_overlaps_revision even with a matching author", () => {
+    const body = P("10000001",
+      R("Payment terms: ") +
+      `<w:ins w:id="50" w:author="Scope Optimizer [clientlookalike]" w:date="${DATE}">` + R("net sixty") + `</w:ins>` + R("."));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const para = doc.projectionRecords()[0]!;
+    const map = buildSpanMap(para.node, () => "accept");
+    // an op whose author string matches the pre-existing revision's author
+    const issue = checkSpan(map, 15, 15, [{ start: 0, end: 0 }], new Set());
+    // ownedRevisions is empty at validation: nothing from this call exists yet
+    void issue;
+    const receipts = doc.apply([
+      { op: "replace", flagId: "f", author: "Scope Optimizer [clientlookalike]", addr: "10000001", start: 15, end: 15, expectText: "", text: "X" },
+    ], { date: DATE });
+    expect(receipts[0]!.status).toBe("refused");
+    expect(receipts[0]!.reason).toBe("span_overlaps_revision");
+  });
+
+  it("RM2: attribute values normalize literal CR/CRLF/TAB like the spec parser (author parity)", () => {
+    const body = `<w:p w14:paraId="10000001">` +
+      `<w:ins w:id="7" w:author="Scope
+Optimizer [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
+      R(" tail") + `</w:p>`;
+    const doc = openDocument(docx(body));
+    const rec = doc.projectionRecords()[0]!;
+    const text = paragraphText(rec.node, (rev) => (rev.author === "Scope Optimizer [f]" ? "reject" : "accept"));
+    expect(text).toBe(" tail"); // the wrapped-author insertion is recognized and rejected
+  });
+
+  it("V1: swapping authors between two flags fails verify", () => {
+    const body = P("10000001", R("Alpha beta gamma delta."));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const receipts = doc.apply([
+      { op: "replace", flagId: "a", author: "Scope Optimizer [a]", addr: "10000001", start: 0, end: 5, expectText: "Alpha", text: "ALPHA" },
+      { op: "replace", flagId: "b", author: "Scope Optimizer [b]", addr: "10000001", start: 6, end: 10, expectText: "beta", text: "BETA" },
+    ], { date: DATE });
+    const out = doc.save();
+    expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    // swap the two flags' authors in the output markup
+    const entries = readPackage(out);
+    let xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    xml = xml.replace("Scope Optimizer [a]", "Scope Optimizer [TMP]").replace("Scope Optimizer [b]", "Scope Optimizer [a]").replace("Scope Optimizer [TMP]", "Scope Optimizer [b]");
+    entries.set("word/document.xml", encodePart(xml));
+    expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
+  });
+
+  it("V2: insertion-only member wording inside a hyperlink stays in place", () => {
+    const body = P("10000001", R("A") + `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1">` + R("BC") + `</w:hyperlink>` + R("D"));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    doc.apply([{ op: "replace", flagId: "f", author: "Scope Optimizer [f]", addr: "10000001", start: 2, end: 2, expectText: "", text: "X" }], { date: DATE });
+    doc.acceptWithWording({ flagId: "f", author: "Scope Optimizer [f]", decision: "accept", text: "Y" });
+    expect(doc.projection()[0]!.text).toBe("ABYCD");
+  });
+
+  it("V3: rejecting a property change restores the saved props (no merge)", () => {
+    const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Scope Optimizer [legacy]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
+    const doc = openDocument(docx(body));
+    doc.decideByPrefix("Scope Optimizer", "reject");
+    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    expect(xml).toContain("<w:i/>");
+    expect(xml).not.toContain("<w:b/>");
+    expect(xml).not.toContain("Scope Optimizer");
   });
 });

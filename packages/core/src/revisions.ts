@@ -176,12 +176,13 @@ export function resolveRevisions(root: XElement, match: (rev: XElement) => boole
       if (decision === "accept") {
         removeChild(t);
       } else {
-        // restore the saved props: the marker's element child holds the old props
+        // restore the saved props: the marker's element child holds the old
+        // props, which REPLACE the current ones (no merge)
         const saved = t.children.find((c) => c.kind === "el");
         const i = parent.children.indexOf(t);
         if (i >= 0) parent.children.splice(i, 1);
         if (saved) {
-          parent.children.splice(i, 0, ...saved.children);
+          parent.children = [...saved.children];
           for (const c of parent.children) if (c.kind === "el") c.parent = parent;
         }
       }

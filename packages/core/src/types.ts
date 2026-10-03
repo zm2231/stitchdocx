@@ -73,6 +73,8 @@ export type RefusalReason =
 export interface Receipt {
   index: number;
   flagId: string;
+  /** the op's author — binds every changeId to the revision identity that wrote it */
+  author: string;
   status: "applied" | "refused";
   reason?: RefusalReason;
   addr: Addr;
@@ -84,4 +86,12 @@ export interface Receipt {
   after?: string;
   /** insertParagraphAfter only */
   insertedAddr?: Addr;
+}
+
+/** result of Document.decide — a decision is document-wide, so it has no op identity */
+export interface DecisionResult {
+  index: number;
+  decision: "accept" | "reject";
+  /** w:id of every revision this decision resolved */
+  changeIds: string[];
 }

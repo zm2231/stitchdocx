@@ -291,23 +291,26 @@ export function decodeEntities(raw: string): string {
 
 /** escaped form stored inside a text node (quote-free context) */
 export function encodeText(text: string): string {
-  return escapeMarkup(normalizeXmlText(text));
+  return escapeMarkup(normalizeNewlines(stripInvalidXmlChars(text)));
 }
 
 /** alias used by consumers that escape run text */
 export const encodeTextSafe = encodeText;
 
 /**
- * Engine-authored text must be valid XML character data: normalize CR/CRLF to
- * LF (spec parser behavior) and strip characters XML 1.0 cannot represent
- * (control chars, lone surrogates, non-characters). Applied only on authored
- * content — parsed raw text is preserved verbatim.
+ * Strips characters XML 1.0 cannot represent (control chars, lone surrogates,
+ * non-characters). Applied only on authored content — parsed raw text is
+ * preserved verbatim.
  */
-export function normalizeXmlText(text: string): string {
+export function stripInvalidXmlChars(text: string): string {
   return text
-    .replace(/\r\n?/g, "\n")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
     .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+}
+
+/** normalize CR/CRLF to LF (what a spec parser does to literal text newlines) */
+export function normalizeNewlines(text: string): string {
+  return text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
 }
 
 function escapeMarkup(s: string): string {
@@ -324,9 +327,15 @@ export function decodeText(raw: string): string {
   return decodeEntities(normalized);
 }
 
-/** escaped form for an attribute value; caller supplies the quote in use */
+/** escaped form for an attribute value; caller supplies the quote in use.
+ * Newlines/tabs/CR are written as character references: XML attribute
+ * normalization would otherwise turn literal whitespace into spaces and the
+ * value would not round-trip. */
 export function encodeAttrValue(text: string, q: '"' | "'"): string {
-  let out = escapeMarkup(normalizeXmlText(text));
+  let out = escapeMarkup(stripInvalidXmlChars(text))
+    .replace(/\n/g, "&#10;")
+    .replace(/\t/g, "&#9;")
+    .replace(/\r/g, "&#13;");
   if (q === '"') out = out.replace(/"/g, "&quot;");
   else out = out.replace(/'/g, "&apos;");
   return out;
@@ -334,7 +343,17 @@ export function encodeAttrValue(text: string, q: '"' | "'"): string {
 
 export function getAttr(el: XElement, name: string): string | null {
   const a = el.attrs.find((a) => a.name === name);
-  return a ? decodeEntities(a.raw) : null;
+  return a ? decodeAttrValue(a.raw) : null;
+}
+
+/**
+ * Attribute-value normalization parity with a spec parser: literal CR/LF
+ * collapse to a single space, then remaining literal tab/newline each become
+ * one space (character references are exempt — decodeEntities runs after).
+ */
+export function decodeAttrValue(raw: string): string {
+  const normalized = /[\t\n\r]/.test(raw) ? raw.replace(/\r\n/g, " ").replace(/[\t\n\r]/g, " ") : raw;
+  return decodeEntities(normalized);
 }
 
 export function setAttr(el: XElement, name: string, value: string): void {
@@ -394,18 +413,28 @@ export function rawNode(raw: string): XRaw {
 
 export function setChildren(el: XElement, children: XNode[]): void {
   for (const c of el.children) if (c.kind === "el" && !children.includes(c)) c.parent = null;
+  for (const c of children) if (c.kind === "el" && c.parent && c.parent !== el) detachFromParent(c);
   el.children = children;
   el.selfClosing = false;
   reassignParents(el);
 }
 
+/** remove a node from its current parent's children (if attached) */
+function detachFromParent(child: XNode): void {
+  if (child.kind !== "el" || !child.parent) return;
+  const i = child.parent.children.indexOf(child);
+  if (i >= 0) child.parent.children.splice(i, 1);
+}
+
 export function appendChild(el: XElement, child: XNode): void {
+  detachFromParent(child);
   el.children.push(child);
   if (el.children.length === 1 && el.selfClosing) el.selfClosing = false;
   reassignParents(el);
 }
 
 export function insertAt(el: XElement, index: number, child: XNode): void {
+  detachFromParent(child);
   el.children.splice(index, 0, child);
   if (el.selfClosing) el.selfClosing = false;
   reassignParents(el);

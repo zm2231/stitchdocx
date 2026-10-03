@@ -11,6 +11,7 @@ export type {
   RefusalReason,
   Receipt,
   Decision,
+  DecisionResult,
   RevisionDecision,
 } from "./types.js";
 export type { View } from "./projection.js";

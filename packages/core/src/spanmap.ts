@@ -1,7 +1,7 @@
 // Span map: the paragraph's visible text tiled into char pieces, each tied to
 // the run that produced it, with the ancestry metadata the refusal checks need
 // (revision, hyperlink/smartTag structure, inline content control, field).
-import { decodeEntities, decodeText, type XElement } from "@stitchdocx/package-io";
+import { decodeText, type XElement } from "@stitchdocx/package-io";
 import { walkContent, type CharKind, type View } from "./projection.js";
 
 export interface SpanPiece {
@@ -89,7 +89,7 @@ export interface SpanIssue {
  * would misreport (e.g. a span crossing into a field result inside a
  * hyperlink must refuse crosses_structure, not in_field).
  */
-export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Array<{ start: number; end: number }>, priorAuthors: ReadonlySet<string> = new Set()): SpanIssue | null {
+export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Array<{ start: number; end: number }>, ownedRevisions: ReadonlySet<XElement> = new Set()): SpanIssue | null {
   const covered = map.pieces.filter((pc) => pc.start < end && pc.end > start);
   let hasRev = false;
   let hasField = false;
@@ -114,21 +114,18 @@ export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Ar
   if (hasField) return { reason: "span_in_field" };
   if (hasSdt) return { reason: "span_in_content_control" };
   if (start === end) {
-    // point insertion: the surrounding run's own revision is refused unless it
-    // is one of this call's prior ops (those get sibling placement instead)
+    // point insertion: the field/sdt protections still apply at the point, and
+    // the surrounding run's revision is refused unless THIS call created it
+    // (those get sibling placement instead)
     const pc = covered[0] ?? pieceAt(map, start);
     if (pc && start >= pc.start && start < pc.end) {
       const info = map.runInfo.get(pc.run)!;
-      const author = info.rev ? authorOf(info.rev) : null;
-      if (info.rev && !priorAuthors.has(author ?? "")) return { reason: "span_overlaps_revision" };
+      if (info.rev && !ownedRevisions.has(info.rev)) return { reason: "span_overlaps_revision" };
+      if (pc.inFieldResult) return { reason: "span_in_field" };
+      if (info.inlineSdt) return { reason: "span_in_content_control" };
     }
   }
   return null;
-}
-
-function authorOf(rev: XElement): string {
-  const a = rev.attrs.find((x) => x.name === "w:author");
-  return a ? decodeEntities(a.raw) : "";
 }
 
 /** offset -> the piece covering it (or the next piece at/after it) */

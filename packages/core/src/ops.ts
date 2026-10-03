@@ -4,7 +4,6 @@
 // original text coordinates — stay valid without adjustment.
 import {
   cloneNode,
-  decodeEntities,
   el,
   setAttr,
   textNode,
@@ -29,6 +28,9 @@ export interface ApplyDeps {
   ids: RevisionIdAllocator;
   paraIds: ParaIdAllocator;
   date: string;
+  /** revision elements created by THIS apply call — the only ones a later op
+   *  may treat as its own (sibling placement); everything else is untouchable */
+  ownedRevisions: Set<XElement>;
 }
 
 const acceptAllView: View = () => "accept";
@@ -46,11 +48,8 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
   const plans: Plan[] = ops.map((op, index) => ({ op, index, status: "applied" }));
   const maps = new Map<Addr, SpanMap>();
   const priorApplied = new Map<Addr, Array<{ start: number; end: number }>>();
-  const authorsBefore = new Map<number, Set<string>>(); // op index -> authors of earlier ops
-  const seenAuthors = new Set<string>();
+  const ownedRevisions = deps.ownedRevisions;
   for (const plan of plans) {
-    authorsBefore.set(plan.index, new Set(seenAuthors));
-    if (plan.op.author) seenAuthors.add(plan.op.author);
     const op = plan.op;
     const para = deps.paraByAddr.get(op.addr);
     if (!para) {
@@ -81,7 +80,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       refuse(plan, "empty_text");
       continue;
     }
-    const issue = checkSpan(map, op.start, op.end, priorApplied.get(op.addr) ?? [], authorsBefore.get(plan.index));
+    const issue = checkSpan(map, op.start, op.end, priorApplied.get(op.addr) ?? [], ownedRevisions);
     if (issue) {
       refuse(plan, issue.reason);
       continue;
@@ -111,7 +110,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       return pb.start - pa.start;
     });
     for (const plan of list) {
-      changeIdsByIndex.set(plan.index, applySpanOp(deps, para, plan.op as SpanOp, authorsBefore.get(plan.index) ?? new Set()));
+      changeIdsByIndex.set(plan.index, applySpanOp(deps, para, plan.op as SpanOp));
     }
   }
   const insertChains = new Map<XElement, XElement>();
@@ -128,6 +127,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     const base: Receipt = {
       index: plan.index,
       flagId: plan.op.flagId,
+      author: plan.op.author,
       status: plan.status,
       addr: plan.op.addr,
       changeIds: [],
@@ -188,7 +188,7 @@ function hasAncestor(p: XElement, name: string): boolean {
 
 type SpanOp = Extract<Op, { op: "replace" }> | Extract<Op, { op: "delete" }>;
 
-function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, authorsBefore: ReadonlySet<string>): string[] {
+function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
   if (op.op === "delete") return applyDeletion(deps, para, op.start, op.end, op.author).ids;
   if (op.granularity === "word") {
     const ids: string[] = [];
@@ -204,7 +204,7 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, authorsBefore:
         ids.push(...applyDeletion(deps, para, op.start + e.delStart, op.start + e.delEnd, op.author).ids);
       }
       if (e.insAt !== undefined && e.insText) {
-        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author, null, authorsBefore));
+        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author, null));
       }
     }
     return ids;
@@ -217,7 +217,7 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, authorsBefore:
     return [...del.ids, insId];
   }
   // pure insertion (empty span)
-  return [applyPointInsertion(deps, para, op.start, op.text, op.author, null, authorsBefore)];
+  return [applyPointInsertion(deps, para, op.start, op.text, op.author, null)];
 }
 
 interface DeletionResult {
@@ -273,6 +273,7 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
     for (const r of seg) r.parent = rev;
     rev.parent = parent;
     delEls.unshift(rev);
+    deps.ownedRevisions.add(rev);
   }
   for (const del of delEls) {
     for (const d of descendantsOf(del)) {
@@ -300,11 +301,12 @@ function insertInsEl(deps: ApplyDeps, afterEl: XElement, text: string, author: s
   const parent = afterEl.parent!;
   parent.children.splice(parent.children.indexOf(afterEl) + 1, 0, ins);
   ins.parent = parent;
+  deps.ownedRevisions.add(ins);
   return ins.attrs.find((a) => a.name === "w:id")!.raw;
 }
 
 /** point insertion at a text offset (word-diff insertions, empty-span replace) */
-function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string, rPr: XElement | null, authorsBefore: ReadonlySet<string>): string {
+function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string, rPr: XElement | null): string {
   const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
   const run = makeRun(rPr, textToRunChildren(text));
   ins.children.push(run);
@@ -326,20 +328,17 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
     parent = para;
     index = para.children.length;
   }
-  // sibling climb: a point that lands inside a prior op's inserted region must
-  // stay OUT of that revision — place the new ins beside it, never nested
-  // (checkSpan already refuses points inside revisions this call does not own)
+  // sibling climb: a point that lands inside a revision created by THIS call
+  // must stay OUT of that revision — place the new ins beside it, never nested
+  // (checkSpan already refuses points inside pre-existing revisions)
   const rev = pc ? map.runInfo.get(pc.run)?.rev : null;
-  if (rev && rev.parent) {
-    const revAuthor = rev.attrs.find((a) => a.name === "w:author");
-    const ownable = !revAuthor || authorsBefore.has(decodeEntities(revAuthor.raw));
-    if (ownable) {
-      parent = rev.parent;
-      index = parent.children.indexOf(rev) + (pc && pc.start < at ? 1 : 0);
-    }
+  if (rev && rev.parent && deps.ownedRevisions.has(rev)) {
+    parent = rev.parent;
+    index = parent.children.indexOf(rev) + (pc && pc.start < at ? 1 : 0);
   }
   parent.children.splice(index, 0, ins);
   ins.parent = parent;
+  deps.ownedRevisions.add(ins);
   return ins.attrs.find((a) => a.name === "w:id")!.raw;
 }
 
@@ -388,6 +387,8 @@ function applyInsertParagraph(deps: ApplyDeps, op: Extract<Op, { op: "insertPara
 
   const addr = deps.paraIds.take();
   setAttr(p, "w14:paraId", addr);
+  deps.ownedRevisions.add(markIns);
+  deps.ownedRevisions.add(runIns);
   return { insertedAddr: addr, ids: [markId, runId], element: p };
 }
 
