@@ -1,0 +1,12 @@
+{
+  "name": "@stitchdocx/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": { "build": "tsup src/index.ts --format esm --dts --out-dir dist" },
+  "dependencies": {
+    "@stitchdocx/package-io": "workspace:*",
+    "diff": "^5.2.0"
+  }
+}

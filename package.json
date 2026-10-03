@@ -1,0 +1,17 @@
+{
+  "name": "stitchdocx",
+  "private": true,
+  "type": "module",
+  "description": "DOCX (OOXML) engine: lossless package IO, tracked-change operations with receipts, and a redline adapter CLI.",
+  "scripts": {
+    "build": "pnpm --filter @stitchdocx/cli build",
+    "test": "vitest run",
+    "verify:handoff": "cd $DOCX_ACCEPTANCE_DIR && npm run verify -- --engine \"node $REPO/packages/cli/dist/cli.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.8"
+  }
+}
