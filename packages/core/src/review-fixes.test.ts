@@ -160,6 +160,22 @@ describe("review round 1 regression tests", () => {
     expect(xml).toContain("gone"); // reject moveFrom restores the text
   });
 
+  it("V3: exact-author decisions resolve moveTo and pPrChange and are idempotent", () => {
+    const body = P("10000001",
+      `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="94" w:author="Ours [legacy]" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` +
+      `<w:moveTo w:id="93" w:author="Ours [legacy]" w:date="${DATE}">` + R("moved") + `</w:moveTo>` + R("stay"));
+    const doc = openDocument(docx(body));
+    const first = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
+    expect(first[0]!.changeIds.sort()).toEqual(["93", "94"]);
+    // a second decision for the same author resolves nothing further
+    const second = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
+    expect(second[0]!.changeIds).toEqual([]);
+    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    expect(openDocument(doc.save()).projection()[0]!.text).toBe("stay"); // reject removes the moveTo content
+    expect(xml).toContain('<w:jc w:val="right"/>'); // pPrChange reject restores the saved props
+    expect(xml).not.toContain("Ours [legacy]");
+  });
+
   it("V4: decide accepts changeIds-based decisions and returns receipts", () => {
     const body = P("10000001", R("The fee is due."));
     const { docx: norm } = normalizeDocx(docx(body));

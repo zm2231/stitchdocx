@@ -20,7 +20,7 @@ import {
 import { walkBody, type BodyWalk } from "./body.js";
 import { acceptAll, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
 import { executeApply, type ApplyDeps } from "./ops.js";
-import { ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
+import { isPairedInsertParagraph, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
 
@@ -169,6 +169,17 @@ export class Document {
       }
       byParagraph.set(paragraph, rec);
     }
+    // container-end insert pairs: an anchor paragraph with our tracked mark
+    // whose next paragraph is the paired inserted half (isPairedInsertParagraph).
+    // Only those paired paragraphs' w:pPrChange records belong to this edit.
+    const paired = new Set<XElement>();
+    for (const [para, rec] of byParagraph) {
+      if (!rec.markIns) continue;
+      const next = para.parent?.children[para.parent.children.indexOf(para) + 1];
+      if (next && next.kind === "el" && next.name === "w:p" && isPairedInsertParagraph(next, decision.author)) {
+        paired.add(next);
+      }
+    }
     for (const [para, rec] of byParagraph) {
       if (rec.markIns && rec.ins.length === 0) {
         // container-end insert form (Word's): the tracked mark sits on the
@@ -227,12 +238,15 @@ export class Document {
         const run = makeRun(rPr, textToRunChildren(decision.text!));
         parent.children.splice(Math.min(insertAt, parent.children.length), 0, run);
         run.parent = parent;
-        // a container-end insert records the anchor's original paragraph
-        // properties in a w:pPrChange; with the wording in place that record
-        // is resolved too
-        const pPr = kid(para, "w:pPr");
-        const change = pPr ? kids(pPr).find((c) => c.name === "w:pPrChange" && getAttr(c, "w:author") === decision.author) : undefined;
-        if (change && pPr) removeChildEl(pPr, change);
+        // a paired container-end insert records the anchor's original
+        // paragraph properties in a w:pPrChange; with the wording in place
+        // that record is resolved too. An unrelated same-author property
+        // change in any other paragraph is left alone.
+        if (paired.has(para)) {
+          const pPr = kid(para, "w:pPr");
+          const change = pPr ? kids(pPr).find((c) => c.name === "w:pPrChange" && getAttr(c, "w:author") === decision.author) : undefined;
+          if (change && pPr) removeChildEl(pPr, change);
+        }
         touched++;
         continue;
       }

@@ -475,7 +475,6 @@ function applyInsertParagraph(
   return { insertedAddr: addr, ids, element: p };
 }
 
-/** place a child element at the end of its parent, wiring the parent pointer */
 /**
  * Track an existing paragraph's mark as inserted: the w:ins goes into the
  * paragraph's w:pPr/w:rPr (creating either level when missing), first among

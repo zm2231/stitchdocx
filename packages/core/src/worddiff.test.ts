@@ -59,6 +59,7 @@ describe("wordEdits contract", () => {
     const TOKENS = [
       "alpha", "Bravo", "$12,500", "net-30", "Client", "deliverables", "within ten (10) days",
       "§4.2", "“quoted”", "é", "\u00A0", " ", "  ", "\t", "\n", "(", ")", ".", ",", "x", "Q5", "2026",
+      "条款", "الشرط", "✓", "\u2009", "\u2007", "\u202F",
     ];
     let seed = 42;
     const rnd = (): number => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);

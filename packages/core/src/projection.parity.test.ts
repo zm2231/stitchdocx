@@ -6,7 +6,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
+import { decodeAttrValue, decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { projectParagraphs, type View } from "./projection.js";
 
@@ -30,7 +30,9 @@ function* docxFiles(dir: string): Generator<string> {
 }
 
 /** every revision author present in a fixture — the "ours" side of a view is
- *  the document's own authors, so no author convention is assumed */
+ *  the document's own authors, so no author convention is assumed. Values are
+ *  decoded like the core's attrVal, so a literal line break in an attribute
+ *  normalizes the same way on both sides of the comparison. */
 function revisionAuthors(bytes: Uint8Array): Set<string> {
   const entries = readPackage(bytes);
   const tree = parseXml(decodePart(entries.get("word/document.xml")!));
@@ -40,7 +42,7 @@ function revisionAuthors(bytes: Uint8Array): Set<string> {
       if (c.kind !== "el") continue;
       if (c.name === "w:ins" || c.name === "w:del" || c.name === "w:moveFrom" || c.name === "w:moveTo" || c.name.endsWith("PrChange")) {
         const a = c.attrs.find((x: any) => x.name === "w:author");
-        if (a) authors.add(a.raw);
+        if (a) authors.add(decodeAttrValue(a.raw));
       }
       visit(c);
     }

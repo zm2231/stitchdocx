@@ -2,7 +2,7 @@
 // receipts claim: every applied receipt's changeIds exist, rejecting them
 // yields `before`, accepting them yields `after`, and no other paragraph
 // differs. Tampering anywhere fails.
-import { decodeEntities, decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
+import { decodeEntities, decodePart, readPackage, parseXml, kid, serializeXml } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { acceptAll, paragraphText, projectParagraphs, type View } from "./projection.js";
 import type { Addr, Receipt } from "./types.js";
@@ -57,6 +57,9 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
       const accepted = outById.get(r.insertedAddr);
       if (!accepted) failures.push(`receipt ${r.index}: inserted paragraph ${r.insertedAddr} missing`);
       else if (accepted.text !== r.after) failures.push(`receipt ${r.index}: accepted text ${JSON.stringify(accepted.text)} != after ${JSON.stringify(r.after ?? "")}`);
+      const anchor = outById.get(r.addr);
+      if (!anchor) failures.push(`receipt ${r.index}: anchor paragraph ${r.addr} missing`);
+      else if (anchor.text !== (r.before ?? "")) failures.push(`receipt ${r.index}: anchor reads ${JSON.stringify(anchor.text)}, expected before ${JSON.stringify(r.before ?? "")}`);
       continue;
     }
     const target = outById.get(r.addr);
@@ -69,8 +72,12 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     if (target.text !== r.after) failures.push(`receipt ${r.index}: accept yields ${JSON.stringify(target.text)}, expected after ${JSON.stringify(r.after ?? "")}`);
   }
 
-  // paragraph accounting: original paragraphs all present; untouched ones unchanged
-  const touchedAddrs = new Set<Addr>(applied.filter((r) => !r.insertedAddr).map((r) => r.addr));
+  // paragraph accounting: original paragraphs all present; untouched ones
+  // byte-identical (text checks alone would pass a formatting tamper — the
+  // anchor-mark insert form saves and restores full paragraph properties, so
+  // untouched-ness is checked at the serialized-node level). Insert anchors
+  // count as touched: the container-end form tracks the anchor's own mark.
+  const touchedAddrs = new Set<Addr>(applied.map((r) => r.addr));
   const expectedCount = origRecords.length + insertAddrs.size;
   if (outRecords.length !== expectedCount) failures.push(`output has ${outRecords.length} paragraphs, expected ${expectedCount}`);
   for (let i = 0; i < origRecords.length; i++) {
@@ -80,11 +87,15 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
       failures.push(`original paragraph ${i} (${addr}) missing from output`);
       continue;
     }
-    const origText = origRecords[i]!.text;
-    if (!touchedAddrs.has(addr) && out.text !== origText) {
-      failures.push(`untouched paragraph ${i} (${addr}) changed: ${JSON.stringify(out.text)} vs ${JSON.stringify(origText)}`);
-    }
     const orig = origRecords[i]!;
+    if (!touchedAddrs.has(addr)) {
+      if (out.text !== orig.text) {
+        failures.push(`untouched paragraph ${i} (${addr}) changed: ${JSON.stringify(out.text)} vs ${JSON.stringify(orig.text)}`);
+      }
+      if (serializeXml(orig.node) !== serializeXml(out.node)) {
+        failures.push(`untouched paragraph ${i} (${addr}) was modified`);
+      }
+    }
     if (out.style !== orig.style || out.numbered !== orig.numbered) failures.push(`paragraph ${i} (${addr}) changed style or numbering`);
   }
 

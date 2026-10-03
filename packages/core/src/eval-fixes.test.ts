@@ -119,6 +119,49 @@ describe("D1: inserted paragraph at the end of a container", () => {
     expect(receipts[0]!.status).toBe("refused");
     expect(receipts[0]!.reason).toBe("paragraph_not_editable");
   });
+
+  it("reject never dissolves a pair whose next paragraph holds kept content", () => {
+    // P1's tracked mark + P2's independently tracked property change by the
+    // same author, with PLAIN (kept) runs in P2: the merge path must run, not
+    // the dissolve — P2 survives with merged text and restored properties
+    const body =
+      P("10000001", `<w:pPr><w:rPr><w:ins w:id="7" w:author="Reviewer A" w:date="${DATE}"/></w:rPr></w:pPr>` + R("Anchor.")) +
+      P("10000000", `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="8" w:author="Reviewer A" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` + R("Kept text."));
+    const doc = openDocument(docx(body));
+    doc.decide([{ author: "Reviewer A", decision: "reject" }]);
+    const out = doc.save();
+    const paras = openDocument(out).projection();
+    expect(paras.map((p) => p.text)).toEqual(["Anchor.Kept text."]);
+    const xml = xmlOf(out);
+    expect(xml).not.toContain("Reviewer A"); // both revisions resolved
+    expect(xml).toContain('<w:jc w:val="right"/>'); // the saved props were restored
+    expect(xml).not.toContain('<w:jc w:val="center"/>');
+    expect(paraXml(xml, "10000000")).toBeTruthy(); // P2 survived on its own paraId
+  });
+
+  it("acceptWithText removes only the paired insert's pPrChange, never an unrelated one", () => {
+    // positive control: a genuine container-end pair
+    const body =
+      P("10000001", `<w:pPr><w:rPr><w:ins w:id="7" w:author="Reviewer A" w:date="${DATE}"/></w:rPr></w:pPr>` + R("Anchor.")) +
+      P("10000000", `<w:pPr><w:pPrChange w:id="8" w:author="Reviewer A" w:date="${DATE}"><w:pPr/></w:pPrChange></w:pPr><w:ins w:id="9" w:author="Reviewer A" w:date="${DATE}">` + R("Clause.") + `</w:ins>`);
+    const doc = openDocument(docx(body));
+    doc.acceptWithText({ ref: "d", author: "Reviewer A", decision: "accept", text: "Clause." });
+    const xml = xmlOf(doc.save());
+    expect(xml).not.toContain("Reviewer A");
+    expect(xml).not.toContain("w:pPrChange");
+    expect(openDocument(doc.save()).projection().map((p) => p.text)).toEqual(["Anchor.", "Clause."]);
+
+    // unrelated: same-author insertion-only edit and pPrChange in one paragraph
+    const body2 =
+      P("10000001", R("Plain paragraph.")) +
+      P("10000000", `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="8" w:author="Reviewer A" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` + R("Kept ") + `<w:ins w:id="9" w:author="Reviewer A" w:date="${DATE}">` + R("words") + `</w:ins>` + R("."));
+    const doc2 = openDocument(docx(body2));
+    doc2.acceptWithText({ ref: "d", author: "Reviewer A", decision: "accept", text: "wording" });
+    const xml2 = xmlOf(doc2.save());
+    expect(xml2).toContain("w:pPrChange"); // the property change is not ours to resolve
+    expect(xml2).toContain('<w:jc w:val="center"/>');
+    expect(openDocument(doc2.save()).projection().at(-1)!.text).toBe("Kept wording.");
+  });
 });
 
 describe("D1: mid-container inserts keep the previous form", () => {
@@ -141,5 +184,20 @@ describe("D1: mid-container inserts keep the previous form", () => {
     const doc = openDocument(docx(body));
     doc.decide([{ author: "Client Author", decision: "reject" }]);
     expect(openDocument(doc.save()).projection().map((p) => p.text)).toEqual(["Anchor.", "Next."]);
+  });
+});
+
+describe("D1: verify catches formatting tamper on untouched paragraphs", () => {
+  it("fails when an untouched paragraph's properties are altered", () => {
+    const body = P("10000001", R("Payments are due net-30.")) + P("10000000", `<w:pPr><w:jc w:val="left"/></w:pPr>` + R("Untouched."));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const receipts = doc.apply([{ op: "replace", ref: "f", author: AUTHOR, addr: "10000001", start: 15, end: 21, expectText: "net-30", text: "net-45" }], { date: DATE });
+    const out = doc.save();
+    expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    const entries = readPackage(out);
+    const xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    entries.set("word/document.xml", encodePart(xml.replace('<w:jc w:val="left"/>', '<w:jc w:val="center"/>')));
+    expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
   });
 });

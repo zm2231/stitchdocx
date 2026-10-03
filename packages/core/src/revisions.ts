@@ -14,7 +14,7 @@ import {
   type XElement,
   type XNode,
 } from "@stitchdocx/package-io";
-import { REVISION_NAMES } from "./projection.js";
+import { REVISION_NAMES, markRevision } from "./projection.js";
 
 export const REVISION_ALL = [...REVISION_NAMES, "w:rPrChange", "w:pPrChange", "w:sectPrChange", "w:tblPrChange"];
 
@@ -92,7 +92,7 @@ export class ParaIdAllocator {
   }
 }
 
-export function newRevisionEl(name: "w:ins" | "w:del", id: string, author: string, date: string): XElement {
+export function newRevisionEl(name: "w:ins" | "w:del" | "w:pPrChange", id: string, author: string, date: string): XElement {
   return el(name, { "w:id": id, "w:author": author, "w:date": date });
 }
 
@@ -227,6 +227,41 @@ export function resolveRevisions(root: XElement, match: (rev: XElement) => boole
   return n;
 }
 
+/** block-level markers that carry no content and may sit between runs */
+const CONTENT_NEUTRAL = new Set([
+  "w:bookmarkStart",
+  "w:bookmarkEnd",
+  "w:proofErr",
+  "w:commentRangeStart",
+  "w:commentRangeEnd",
+  "w:commentReference",
+]);
+
+/**
+ * True when `para` is the inserted half of a container-end insert pair written
+ * by `author` (the markup applyInsertParagraph writes, and Word writes for the
+ * same edit): it carries a same-author w:pPrChange, its own mark is untracked
+ * (so it is the last paragraph of its chain), and every content child is
+ * tracked-inserted by that same author. Only then can resolving the pair
+ * dissolve the paragraph without losing content the user kept.
+ */
+export function isPairedInsertParagraph(para: XElement, author: string): boolean {
+  const pPr = kid(para, "w:pPr");
+  const change = pPr ? kid(pPr, "w:pPrChange") : null;
+  if (!change || attrOf(change, "w:author") !== author) return false;
+  if (markRevision(para)) return false; // a tracked mark means a chain middle: merge, don't dissolve
+  let sawOwnInsertion = false;
+  for (const c of para.children) {
+    if (c.kind !== "el" || c.name === "w:pPr" || CONTENT_NEUTRAL.has(c.name)) continue;
+    if ((c.name === "w:ins" || c.name === "w:moveTo") && attrOf(c, "w:author") === author) {
+      sawOwnInsertion = true;
+      continue;
+    }
+    return false; // plain, deleted, or other-authored content must survive
+  }
+  return sawOwnInsertion;
+}
+
 /**
  * Reject the tracked-inserted paragraph mark `mark` on paragraph `para`.
  * Merges `para` into the next w:p sibling when there is one and the mark can
@@ -245,12 +280,7 @@ function rejectParagraphMark(para: XElement, mark: XElement, rejected: Set<XElem
   if (next && next.kind === "el" && next.name === "w:p") {
     const nextPPr = kid(next, "w:pPr");
     const change = nextPPr ? kid(nextPPr, "w:pPrChange") : null;
-    if (
-      change &&
-      rejected.has(change) &&
-      attrOf(change, "w:author") !== null &&
-      attrOf(change, "w:author") === attrOf(mark, "w:author")
-    ) {
+    if (change && rejected.has(change) && isPairedInsertParagraph(next, attrOf(mark, "w:author") ?? "")) {
       // paired insert: the next paragraph exists only because of this mark —
       // drop it and leave the anchor as it was before the op
       removeChild(next);
