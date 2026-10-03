@@ -26,6 +26,17 @@ export function* revisionElements(root: XElement): Generator<XElement> {
   for (const e of walkAll(root)) if (isRevisionEl(e)) yield e;
 }
 
+/** revision elements in document order (walkAll's stack walk is reversed) */
+function revisionElementsInOrder(root: XElement): XElement[] {
+  const out: XElement[] = [];
+  const visit = (node: XElement): void => {
+    if (isRevisionEl(node)) out.push(node);
+    for (const c of node.children) if (c.kind === "el") visit(c);
+  };
+  visit(root);
+  return out;
+}
+
 export function* walkAll(root: XElement): Generator<XElement> {
   const stack: XElement[] = [root];
   while (stack.length) {
@@ -153,17 +164,41 @@ export function makeRun(rPr: XElement | null, content: XNode[]): XElement {
  * accept removes, reject unwraps and restores the original text. Property
  * changes: accept removes the marker (current props stay), reject restores
  * the saved props carried inside the marker.
+ *
+ * Rejecting a paragraph-mark ins merges the paragraph into the next w:p in
+ * its container (that is what the mark means: OOXML tracks the mark, and
+ * rejecting it un-paragraphs the text). When there is no next paragraph —
+ * container end, or a table follows — Word cannot remove the mark either, so
+ * the paragraph stays and only the tracking is removed. When the next
+ * paragraph carries a same-author w:pPrChange that is rejected in the same
+ * call (the markup applyInsertParagraph writes at a container end, and the
+ * markup Word itself writes there), the pair dissolves instead: the inserted
+ * paragraph is removed and the anchor survives untouched.
  */
 export function resolveRevisions(root: XElement, match: (rev: XElement) => boolean, decision: "accept" | "reject"): number {
-  const targets = [...revisionElements(root)].filter((r) => match(r));
+  // document order matters: a paragraph-mark ins must be resolved while the
+  // paired w:pPrChange on the following paragraph is still in place
+  const targets = revisionElementsInOrder(root).filter((r) => match(r));
+  const targetSet = new Set(targets);
   let n = 0;
   for (const t of targets) {
+    if (!attached(t, root)) {
+      n++; // already gone: it lived inside a paragraph removed earlier in this pass
+      continue;
+    }
     if (t.name === "w:ins" || t.name === "w:moveTo") {
       if (decision === "accept") {
         const parent = t.parent;
         if (parent && parent.name === "w:rPr") removeChild(t); // paragraph mark
         else unwrap(t);
-      } else removeChild(t);
+      } else {
+        const rPr = t.parent;
+        const pPr = rPr?.parent;
+        const para = pPr?.parent;
+        if (rPr && rPr.name === "w:rPr" && pPr && pPr.name === "w:pPr" && para && para.name === "w:p") {
+          rejectParagraphMark(para, t, targetSet, root);
+        } else removeChild(t);
+      }
     } else if (t.name === "w:del" || t.name === "w:moveFrom") {
       if (decision === "accept") removeChild(t);
       else {
@@ -190,6 +225,64 @@ export function resolveRevisions(root: XElement, match: (rev: XElement) => boole
     n++;
   }
   return n;
+}
+
+/**
+ * Reject the tracked-inserted paragraph mark `mark` on paragraph `para`.
+ * Merges `para` into the next w:p sibling when there is one and the mark can
+ * meaningfully be removed; dissolves a same-author paired insert (next
+ * paragraph carries a rejected same-author w:pPrChange — the container-end
+ * insert form) by removing the inserted paragraph and restoring `para`
+ * exactly; otherwise only untracks the mark.
+ */
+function rejectParagraphMark(para: XElement, mark: XElement, rejected: Set<XElement>, root: XElement): void {
+  const container = para.parent;
+  if (!container) {
+    removeChild(mark);
+    return;
+  }
+  const next = container.children[container.children.indexOf(para) + 1];
+  if (next && next.kind === "el" && next.name === "w:p") {
+    const nextPPr = kid(next, "w:pPr");
+    const change = nextPPr ? kid(nextPPr, "w:pPrChange") : null;
+    if (
+      change &&
+      rejected.has(change) &&
+      attrOf(change, "w:author") !== null &&
+      attrOf(change, "w:author") === attrOf(mark, "w:author")
+    ) {
+      // paired insert: the next paragraph exists only because of this mark —
+      // drop it and leave the anchor as it was before the op
+      removeChild(next);
+      removeChild(mark);
+      return;
+    }
+    // a paragraph carrying a section break cannot dissolve into the next one
+    const paraPPr = kid(para, "w:pPr");
+    if (paraPPr && kid(paraPPr, "w:sectPr")) {
+      removeChild(mark);
+      return;
+    }
+    // merge: para's content moves in front of the next paragraph's content
+    const at = next.children[0] && next.children[0].kind === "el" && next.children[0].name === "w:pPr" ? 1 : 0;
+    const moving = para.children.filter((c) => !(c.kind === "el" && c.name === "w:pPr"));
+    next.children.splice(at, 0, ...moving);
+    for (const c of moving) if (c.kind === "el") c.parent = next;
+    container.children.splice(container.children.indexOf(para), 1);
+    para.parent = null;
+    return;
+  }
+  // container end, or a table follows: Word cannot remove the mark either
+  removeChild(mark);
+}
+
+function attached(e: XElement, root: XElement): boolean {
+  let cur: XElement | null = e;
+  while (cur) {
+    if (cur === root) return true;
+    cur = cur.parent;
+  }
+  return false;
 }
 
 function* descendants(root: XElement): Generator<XElement> {

@@ -42,11 +42,22 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     const ids = new Set((r.changeIds ?? []).map(String));
     const rejectMine: View = (rev) => (rev.id !== null && ids.has(rev.id) ? "reject" : "accept");
     if (r.insertedAddr) {
-      // the inserted paragraph disappears under rejection
       const rejRecords = projectParagraphs(outDoc.walk, rejectMine);
-      const still = rejRecords.find((rec) => rec.addr === r.insertedAddr && rec.text !== "");
-      if (still) failures.push(`receipt ${r.index}: inserted paragraph survives rejection`);
-      const accepted = r.insertedAddr ? outById.get(r.insertedAddr) : undefined;
+      const rejByAddr = new Map<string, (typeof rejRecords)[number]>();
+      for (const rec of rejRecords) if (rec.addr) rejByAddr.set(rec.addr, rec);
+      const rejected = rejByAddr.get(r.insertedAddr);
+      if (rejected && rejected.text !== "") {
+        // Word's container-end form: the tracked insertion sits on the
+        // anchor's mark, so rejecting merges the anchor paragraph into the
+        // inserted one — which must read exactly like the anchor did
+        if (rejected.text !== (r.before ?? "")) {
+          failures.push(`receipt ${r.index}: rejected insert reads ${JSON.stringify(rejected.text)}, expected ${JSON.stringify(r.before ?? "")}`);
+        }
+        if (rejByAddr.get(r.addr)) {
+          failures.push(`receipt ${r.index}: anchor paragraph survives beside the merged insert`);
+        }
+      }
+      const accepted = outById.get(r.insertedAddr);
       if (!accepted) failures.push(`receipt ${r.index}: inserted paragraph ${r.insertedAddr} missing`);
       else if (accepted.text !== r.after) failures.push(`receipt ${r.index}: accepted text ${JSON.stringify(accepted.text)} != after ${JSON.stringify(r.after ?? "")}`);
       continue;

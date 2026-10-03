@@ -5,12 +5,13 @@
 import {
   cloneNode,
   el,
+  kid,
   setAttr,
   textNode,
   type XElement,
 } from "@stitchdocx/package-io";
 import { buildSpanMap, checkSpan, pieceAt, type SpanMap } from "./spanmap.js";
-import { paragraphText, textContent, type View } from "./projection.js";
+import { markRevision, paragraphText, textContent, type View } from "./projection.js";
 import {
   cloneRunPr,
   makeRun,
@@ -59,6 +60,12 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     if (op.op === "insertParagraphAfter") {
       if (!op.text || op.text.trim() === "") refuse(plan, "empty_text");
       else if (op.scope === "table" && !hasAncestor(para, "w:tbl")) refuse(plan, "addr_not_found");
+      else if (!op.scope && nextBlockSibling(para)?.name !== "w:p" && markRevision(para)) {
+        // at a container end the insert must track the ANCHOR's paragraph
+        // mark (Word's form); an anchor whose mark is already tracked by any
+        // author cannot carry ours, and Word could not reject the result
+        refuse(plan, "paragraph_not_editable");
+      }
       continue;
     }
     const map = getMap(maps, para);
@@ -114,9 +121,25 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     }
   }
   const insertChains = new Map<XElement, XElement>();
-  for (const plan of plans) {
-    if (plan.status !== "applied" || plan.op.op !== "insertParagraphAfter") continue;
-    const { insertedAddr, ids, element } = applyInsertParagraph(deps, plan.op, insertChains);
+  const insertPlans = plans.filter((p) => p.status === "applied" && p.op.op === "insertParagraphAfter");
+  // decided up front against the pristine tree: the last insert per anchor
+  // ends its chain, and whether a paragraph follows the chain decides the
+  // markup form (inside the loop the tree is already mutating)
+  const chainEndPlan = new Map<XElement, Plan>();
+  const chainFollowsParagraph = new Map<XElement, boolean>();
+  for (const plan of insertPlans) {
+    const op = plan.op as Extract<Op, { op: "insertParagraphAfter" }>;
+    const key = chainKeyOf(op, deps.paraByAddr.get(op.addr)!);
+    chainEndPlan.set(key, plan);
+    if (!chainFollowsParagraph.has(key)) chainFollowsParagraph.set(key, nextBlockSibling(key)?.name === "w:p");
+  }
+  for (const plan of insertPlans) {
+    const op = plan.op as Extract<Op, { op: "insertParagraphAfter" }>;
+    const key = chainKeyOf(op, deps.paraByAddr.get(op.addr)!);
+    const { insertedAddr, ids, element } = applyInsertParagraph(deps, op, insertChains, {
+      chainEnd: chainEndPlan.get(key) === plan,
+      followsParagraph: chainFollowsParagraph.get(key)!,
+    });
     insertedAddrByIndex.set(plan.index, insertedAddr);
     changeIdsByIndex.set(plan.index, ids);
     deps.paraByAddr.set(insertedAddr, element); // receipts (and later ops) can address it
@@ -344,34 +367,95 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
 
 // ———————————————————————————————————————————————————————————— insert para
 
-function applyInsertParagraph(deps: ApplyDeps, op: Extract<Op, { op: "insertParagraphAfter" }>, chains: Map<XElement, XElement>): { insertedAddr: string; ids: string[]; element: XElement } {
-  const anchor = deps.paraByAddr.get(op.addr)!;
-  let afterEl = anchor;
-  let chainKey = anchor;
+const BLOCK_SIBLINGS = new Set(["w:p", "w:tbl", "w:sdt", "w:customXml"]);
+
+/** the next block-level sibling (paragraph, table, block sdt), or null */
+function nextBlockSibling(e: XElement): XElement | null {
+  const parent = e.parent;
+  if (!parent) return null;
+  for (let i = parent.children.indexOf(e) + 1; i < parent.children.length; i++) {
+    const c = parent.children[i]!;
+    if (c.kind === "el" && BLOCK_SIBLINGS.has(c.name)) return c;
+  }
+  return null;
+}
+
+/** element a chained insert hangs off: the containing table for scope "table", else the anchor paragraph */
+function chainKeyOf(op: Extract<Op, { op: "insertParagraphAfter" }>, anchor: XElement): XElement {
   if (op.scope === "table") {
     let cur = anchor.parent;
     while (cur && cur.name !== "w:tbl") cur = cur.parent;
-    if (cur) {
-      afterEl = cur;
-      chainKey = cur;
-    }
+    if (cur) return cur;
   }
-  const effectiveAfter = chains.get(chainKey) ?? afterEl;
-  const markId = deps.ids.take();
-  const runId = deps.ids.take();
+  return anchor;
+}
+
+function applyInsertParagraph(
+  deps: ApplyDeps,
+  op: Extract<Op, { op: "insertParagraphAfter" }>,
+  chains: Map<XElement, XElement>,
+  form: { chainEnd: boolean; followsParagraph: boolean },
+): { insertedAddr: string; ids: string[]; element: XElement } {
+  const anchor = deps.paraByAddr.get(op.addr)!;
+  const chainKey = chainKeyOf(op, anchor);
+  const effectiveAfter = chains.get(chainKey) ?? chainKey;
   const author = op.author;
 
-  const p = el("w:p");
-  const pPr = el("w:pPr");
-  const rPr = el("w:rPr");
-  const markIns = newRevisionEl("w:ins", markId, author, deps.date);
-  rPr.children.push(markIns);
-  markIns.parent = rPr;
-  pPr.children.push(rPr);
-  rPr.parent = pPr;
-  p.children.push(pPr);
-  pPr.parent = p;
+  // Word's container-end form: no paragraph follows the chain, so the anchor's
+  // own mark is the tracked insertion and the last new paragraph keeps an
+  // untracked mark plus a w:pPrChange recording the anchor's original
+  // properties. Rejecting the pair restores the anchor exactly. (After a
+  // table there is no anchor mark to track — the mark rides on the new
+  // paragraph, whose removal Word cannot reject either.)
+  const anchorMarkForm = form.chainEnd && !form.followsParagraph && chainKey.name === "w:p";
 
+  const p = el("w:p");
+  const ids: string[] = [];
+  let markIns: XElement | null = null;
+  if (anchorMarkForm) {
+    const markId = deps.ids.take();
+    const changeId = deps.ids.take();
+    const runId = deps.ids.take();
+    ids.push(markId, changeId, runId);
+
+    const pPr = el("w:pPr");
+    const change = newRevisionEl("w:pPrChange", changeId, author, deps.date);
+    const saved = el("w:pPr");
+    const anchorPPr = kid(anchor, "w:pPr");
+    for (const c of anchorPPr?.children ?? []) {
+      // the saved state carries the anchor's paragraph properties; mark
+      // formatting and nested change records are not paragraph properties
+      if (c.kind === "el" && (c.name === "w:rPr" || c.name === "w:pPrChange")) continue;
+      const clone = cloneNode(c);
+      saved.children.push(clone);
+      if (clone.kind === "el") clone.parent = saved;
+    }
+    change.children.push(saved);
+    saved.parent = change;
+    pPr.children.push(change);
+    change.parent = pPr;
+    p.children.push(pPr);
+    pPr.parent = p;
+
+    markIns = newRevisionEl("w:ins", markId, author, deps.date);
+    addParagraphMarkIns(anchor, markIns);
+    deps.ownedRevisions.add(markIns);
+  } else {
+    const markId = deps.ids.take();
+    const runId = deps.ids.take();
+    ids.push(markId, runId);
+    const pPr = el("w:pPr");
+    markIns = newRevisionEl("w:ins", markId, author, deps.date);
+    const rPr = el("w:rPr");
+    rPr.children.push(markIns);
+    markIns.parent = rPr;
+    pPr.children.push(rPr);
+    rPr.parent = pPr;
+    p.children.push(pPr);
+    pPr.parent = p;
+  }
+
+  const runId = ids[ids.length - 1]!;
   const runIns = newRevisionEl("w:ins", runId, author, deps.date);
   const anchorRunPr = cloneRunPr(firstRun(anchor));
   const run = makeRun(anchorRunPr, textToRunChildren(op.text));
@@ -379,6 +463,7 @@ function applyInsertParagraph(deps: ApplyDeps, op: Extract<Op, { op: "insertPara
   run.parent = runIns;
   p.children.push(runIns);
   runIns.parent = p;
+  deps.ownedRevisions.add(runIns);
 
   const parent = effectiveAfter.parent!;
   parent.children.splice(parent.children.indexOf(effectiveAfter) + 1, 0, p);
@@ -387,9 +472,40 @@ function applyInsertParagraph(deps: ApplyDeps, op: Extract<Op, { op: "insertPara
 
   const addr = deps.paraIds.take();
   setAttr(p, "w14:paraId", addr);
-  deps.ownedRevisions.add(markIns);
-  deps.ownedRevisions.add(runIns);
-  return { insertedAddr: addr, ids: [markId, runId], element: p };
+  return { insertedAddr: addr, ids, element: p };
+}
+
+/** place a child element at the end of its parent, wiring the parent pointer */
+/**
+ * Track an existing paragraph's mark as inserted: the w:ins goes into the
+ * paragraph's w:pPr/w:rPr (creating either level when missing), first among
+ * the rPr children per CT_ParaRPr order, and before w:sectPr/w:pPrChange in
+ * the pPr per CT_PPr order.
+ */
+function addParagraphMarkIns(para: XElement, ins: XElement): void {
+  let pPr = kid(para, "w:pPr");
+  if (!pPr) {
+    pPr = el("w:pPr");
+    para.children.unshift(pPr);
+    pPr.parent = para;
+  }
+  const rPr = kid(pPr, "w:rPr");
+  if (rPr) {
+    rPr.children.unshift(ins);
+    ins.parent = rPr;
+    return;
+  }
+  const fresh = el("w:rPr");
+  fresh.children.push(ins);
+  ins.parent = fresh;
+  let at = pPr.children.length;
+  while (at > 0) {
+    const last = pPr.children[at - 1]!;
+    if (last.kind === "el" && (last.name === "w:sectPr" || last.name === "w:pPrChange")) at--;
+    else break;
+  }
+  pPr.children.splice(at, 0, fresh);
+  fresh.parent = pPr;
 }
 
 function firstRun(p: XElement): XElement | null {
