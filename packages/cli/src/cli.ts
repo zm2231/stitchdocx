@@ -1,8 +1,13 @@
 #!/usr/bin/env node
-// Redline adapter CLI — the five-op contract the handoff harness tests (see
-// the handoff API.md). Thin over the stitchdocx core; the only place Node
-// built-ins appear. Every command prints one JSON object and exits 0; a
-// non-zero exit means the engine itself failed (refusals are not failures).
+// Redline adapter CLI: five commands over a .docx file, printing one JSON
+// object per command on stdout. This is the only place Node built-ins appear;
+// the core stays runtime-neutral. A non-zero exit means the engine itself
+// failed (refusals are not failures). The wire contract is documented in
+// packages/cli/README.md.
+//
+// The wire format names each operation's correlation field `flagId`; the core
+// calls it `ref` (a neutral caller id echoed on receipts). This adapter maps
+// between the two and is the only place the wire name exists.
 import { readFileSync, writeFileSync } from "node:fs";
 import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision, type RevisionDecision } from "@stitchdocx/core";
 
@@ -15,6 +20,22 @@ function fail(msg: string): never {
 
 const out = (json: unknown): void => {
   process.stdout.write(JSON.stringify(json));
+};
+
+type WireOp = Omit<Op, "ref"> & { ref?: string; flagId?: string };
+const toCoreOp = (o: WireOp): Op => {
+  const { flagId, ...rest } = o;
+  return { ...rest, ref: rest.ref ?? flagId ?? "" } as Op;
+};
+
+type WireReceipt = Omit<Receipt, "ref"> & { ref?: string; flagId?: string };
+const toCoreReceipt = (r: WireReceipt): Receipt => {
+  const { flagId, ...rest } = r;
+  return { ...rest, ref: rest.ref ?? flagId ?? "" } as Receipt;
+};
+const toWireReceipt = (r: Receipt): WireReceipt => {
+  const { ref, ...rest } = r;
+  return { ...rest, flagId: ref };
 };
 
 try {
@@ -40,31 +61,32 @@ try {
     case "apply": {
       const [inp, opsPath, outp] = args;
       if (!inp || !opsPath || !outp) fail("usage: apply <in.docx> <ops.json> <out.docx>");
-      const spec = JSON.parse(readFileSync(opsPath, "utf8")) as { date: string; ops: Op[] };
+      const spec = JSON.parse(readFileSync(opsPath, "utf8")) as { date: string; ops: WireOp[] };
       const doc = openDocument(new Uint8Array(readFileSync(inp)));
-      const receipts: Receipt[] = doc.apply(spec.ops ?? [], { date: spec.date });
+      const receipts: Receipt[] = doc.apply((spec.ops ?? []).map(toCoreOp), { date: spec.date });
       writeFileSync(outp, doc.save());
-      out({ receipts });
+      out({ receipts: receipts.map(toWireReceipt) });
       break;
     }
     case "finalize": {
       const [inp, decPath, outp] = args;
       if (!inp || !decPath || !outp) fail("usage: finalize <in.docx> <decisions.json> <out.docx>");
-      const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: Decision[] };
+      const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: Array<Omit<Decision, "ref"> & { ref?: string; flagId?: string }> };
       const doc = openDocument(new Uint8Array(readFileSync(inp)));
       const results: Array<{ flagId: string; author: string; decision: string; resolved: number }> = [];
       // resolve exactly the authors named in the decisions — revisions by
       // anyone else (including earlier runs' work in a re-uploaded redline)
       // must survive untouched
       for (const d of spec.decisions ?? []) {
-        if (d.text !== undefined) {
-          const resolved = doc.acceptWithWording(d);
-          results.push({ flagId: d.flagId, author: d.author, decision: "accept", resolved });
+        const core: Decision = { ...d, ref: d.ref ?? d.flagId ?? "" };
+        if (core.text !== undefined) {
+          const resolved = doc.acceptWithText(core);
+          results.push({ flagId: d.flagId ?? "", author: d.author, decision: "accept", resolved });
         } else {
           const engineDecision: RevisionDecision = { author: d.author, decision: d.decision };
           const decided = doc.decide([engineDecision]);
           const resolved = decided.reduce((n, r) => n + r.changeIds.length, 0);
-          results.push({ flagId: d.flagId, author: d.author, decision: d.decision, resolved });
+          results.push({ flagId: d.flagId ?? "", author: d.author, decision: d.decision, resolved });
         }
       }
       writeFileSync(outp, doc.save());
@@ -74,8 +96,8 @@ try {
     case "verify": {
       const [origPath, outPath, receiptsPath] = args;
       if (!origPath || !outPath || !receiptsPath) fail("usage: verify <original.docx> <output.docx> <receipts.json>");
-      const spec = JSON.parse(readFileSync(receiptsPath, "utf8")) as { receipts: Receipt[] };
-      const result = verifyOutput(new Uint8Array(readFileSync(origPath)), new Uint8Array(readFileSync(outPath)), spec.receipts ?? []);
+      const spec = JSON.parse(readFileSync(receiptsPath, "utf8")) as { receipts: WireReceipt[] };
+      const result = verifyOutput(new Uint8Array(readFileSync(origPath)), new Uint8Array(readFileSync(outPath)), (spec.receipts ?? []).map(toCoreReceipt));
       out(result);
       break;
     }

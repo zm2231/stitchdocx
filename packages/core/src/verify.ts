@@ -7,9 +7,6 @@ import { walkBody } from "./body.js";
 import { acceptAll, paragraphText, projectParagraphs, type View } from "./projection.js";
 import type { Addr, Receipt } from "./types.js";
 
-/** the adapter namespace: receipt revisions must be authored under it */
-export const OUR_AUTHOR_PREFIX = "Scope Optimizer";
-void OUR_AUTHOR_PREFIX;
 export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts: Receipt[]): { ok: boolean; failures: string[] } {
   const failures: string[] = [];
   const origDoc = openForVerify(original);

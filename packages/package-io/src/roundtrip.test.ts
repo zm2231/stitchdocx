@@ -1,15 +1,15 @@
 // M1: lossless package round-trip — re-saving an untouched package keeps
 // every entry's content byte-identical, entry ORDER survives, and writing the
-// same entries twice produces identical bytes (determinism).
+// same entries twice produces identical bytes (determinism). The fixture-
+// derived half runs only when DOCX_ACCEPTANCE_DIR points at the acceptance
+// folder; the synthetic invariants always run.
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { describe, it, expect } from "vitest";
-import { zipSync } from "fflate";
 import { decodePart, decodePart as dec, encodePart, readPackage, writePackage } from "./zip.js";
 import { parseXml, serializeXml } from "./xml.js";
 
-const HANDOFF = process.env.STITCH_HANDOFF ?? join(homedir(), "Downloads", "scope-docx-engine-handoff");
+const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
 /** minimal stored (uncompressed) zip writer with explicit central-directory order */
 function storedZip(entries: Array<[string, Uint8Array]>): Uint8Array {
@@ -58,8 +58,36 @@ function* docxFiles(dir: string): Generator<string> {
   }
 }
 
-describe("M1 lossless package round-trip", () => {
-  const fixtures = [...docxFiles(join(HANDOFF, "fixtures"))];
+describe("M1 package round-trip (synthetic invariants)", () => {
+  it("entry ORDER survives a round-trip, including integer-like names (P2)", () => {
+    // fflate's object API reorders integer-like keys before writing, so build a
+    // raw stored-entry archive whose central directory order is 10, 2, word/ —
+    // an Object-based read would return 2, 10, word/
+    const raw = storedZip([
+      ["10", encodePart("ten")],
+      ["2", encodePart("two")],
+      ["word/", new Uint8Array()],
+    ]);
+    const entries = readPackage(raw);
+    expect([...entries.keys()]).toEqual(["10", "2", "word/"]);
+    const out = readPackage(writePackage(entries));
+    expect([...out.keys()]).toEqual(["10", "2", "word/"]);
+  });
+
+  it("UTF-8 entry names round-trip exactly (P6)", () => {
+    const entries = new Map<string, Uint8Array>([
+      ["word/é.xml", encodePart("café")],
+      ["word/ok.xml", encodePart("plain")],
+    ]);
+    const out = readPackage(writePackage(entries));
+    expect([...out.keys()]).toEqual(["word/é.xml", "word/ok.xml"]);
+    expect(new TextDecoder().decode(out.get("word/é.xml")!)).toBe("café");
+  });
+});
+
+const d = ACCEPTANCE ? describe : describe.skip;
+d("M1 lossless round-trip over acceptance fixtures" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"), () => {
+  const fixtures = [...docxFiles(join(ACCEPTANCE, "fixtures"))];
   it("rezip keeps every entry byte-identical", () => {
     expect(fixtures.length).toBeGreaterThan(20);
     for (const docx of fixtures) {
@@ -94,31 +122,6 @@ describe("M1 lossless package round-trip", () => {
       }
       expect(new TextDecoder().decode(out.get("word/document.xml")!)).toBe(xml);
     }
-  });
-
-  it("entry ORDER survives a round-trip, including integer-like names (P2)", () => {
-    // fflate's object API reorders integer-like keys before writing, so build a
-    // raw stored-entry archive whose central directory order is 10, 2, word/ —
-    // an Object-based read would return 2, 10, word/
-    const raw = storedZip([
-      ["10", encodePart("ten")],
-      ["2", encodePart("two")],
-      ["word/", new Uint8Array()],
-    ]);
-    const entries = readPackage(raw);
-    expect([...entries.keys()]).toEqual(["10", "2", "word/"]);
-    const out = readPackage(writePackage(entries));
-    expect([...out.keys()]).toEqual(["10", "2", "word/"]);
-  });
-
-  it("UTF-8 entry names round-trip exactly (P6)", () => {
-    const entries = new Map<string, Uint8Array>([
-      ["word/é.xml", encodePart("café")],
-      ["word/ok.xml", encodePart("plain")],
-    ]);
-    const out = readPackage(writePackage(entries));
-    expect([...out.keys()]).toEqual(["word/é.xml", "word/ok.xml"]);
-    expect(new TextDecoder().decode(out.get("word/é.xml")!)).toBe("café");
   });
 
   it("writePackage is byte-deterministic across independent invocations (P4)", () => {

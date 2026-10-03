@@ -2,9 +2,14 @@
   "name": "@stitchdocx/cli",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
-  "bin": { "stitchdocx": "dist/cli.js" },
-  "scripts": { "build": "tsup src/cli.ts --format esm --out-dir dist --target node18" },
+  "bin": {
+    "stitchdocx": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --out-dir dist --target node18"
+  },
   "dependencies": {
     "@stitchdocx/core": "workspace:*",
     "@stitchdocx/package-io": "workspace:*"

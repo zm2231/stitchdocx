@@ -1,7 +1,8 @@
-// Projection of word/document.xml into paragraphs — semantics ported to match
-// the independent harness reader exactly (that reader is the judge; where its
-// behavior is quirky, e.g. nested-field visibility and per-container mark
-// merging, we reproduce the behavior, not "fix" it).
+// Projection of word/document.xml into paragraphs — semantics follow Word's
+// documented tracked-change behavior (paragraph marks that are not visible
+// merge the paragraph into the next one in the same container; text inside a
+// complex field's instruction part is hidden), matching what Word and
+// LibreOffice show, not any particular test reader.
 //
 // One walker serves two consumers: paragraphText (projection) and the span
 // map (mutation input), so text and offsets can never disagree.

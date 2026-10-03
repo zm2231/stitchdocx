@@ -1,6 +1,6 @@
-// Body traversal in the exact order the harness reader uses: document order,
-// tables cell by cell (row-major), block content controls and customXml
-// descended into. The paragraph registry is view-independent (addressing);
+// Body traversal in document order: tables cell by cell (row-major), block
+// content controls and customXml descended into. The paragraph registry is
+// view-independent (addressing);
 // the projection (views, mark merging) lives in projection.ts.
 import { kid, kids, type XElement } from "@stitchdocx/package-io";
 

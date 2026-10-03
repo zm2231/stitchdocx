@@ -149,7 +149,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
   return plans.map((plan): Receipt => {
     const base: Receipt = {
       index: plan.index,
-      flagId: plan.op.flagId,
+      ref: plan.op.ref,
       author: plan.op.author,
       status: plan.status,
       addr: plan.op.addr,

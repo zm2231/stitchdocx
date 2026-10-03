@@ -1,29 +1,38 @@
 # stitchdocx
 
-**Status: Phase 1 goal complete — the engine core + redline adapter pass the
-independent handoff harness 40/40.**
+A pure-TypeScript, Worker-compatible DOCX (OOXML) engine for reading,
+tracked-change editing and verifying Word documents. The XML tree is the
+document: untouched subtrees and package parts re-serialize byte-identically,
+so an edit changes exactly what it claims to change.
 
-The engine is a pure-TypeScript, Worker-compatible DOCX (OOXML) library:
-
-- `packages/package-io` — byte-faithful XML tree (400/400 fixture parts
-  round-trip byte-identically), zip package IO with deterministic output,
-  light part registry.
-- `packages/core` — paraId addressing, reader-exact projection, hardened span
-  resolution, tracked-change ops (`replace` span/word, `delete`,
+- `packages/package-io` — byte-faithful XML tree (every fixture part round-
+  trips byte-identically), zip package IO with deterministic output, light
+  part registry.
+- `packages/core` — paraId addressing, Word-faithful projection, hardened
+  span resolution, tracked-change ops (`replace` span/word, `delete`,
   `insertParagraphAfter`) with receipts and a closed refusal taxonomy, pure
   accept/reject resolution, receipt verification, deterministic save.
-- `packages/cli` — the five-op redline adapter CLI (`normalize`, `paragraphs`,
-  `apply`, `finalize`, `verify`) that the acceptance harness drives.
+- `packages/cli` — the five-op adapter CLI (`normalize`, `paragraphs`,
+  `apply`, `finalize`, `verify`); see [packages/cli/README.md](packages/cli/README.md).
 
-## Acceptance gate (continuously runnable)
+## Development
 
 ```bash
-cd $DOCX_ACCEPTANCE_DIR
-npm run selftest                                        # independent reader tests: 6/6
-npm run verify -- --engine "node $REPO/packages/cli/dist/cli.js"   # 40/40
+pnpm install
+pnpm build   # bundles packages/cli to dist/cli.js
+pnpm test    # unit + property suites
 ```
 
-Rules: zero edits to `cases/` or `harness/`. Additional
-gates: `pnpm test` (fidelity/round-trip/parity-oracle suites),
-`wrangler deploy --dry-run` (Worker bundle, `tools/worker-entry`), permissive-
-only deps (fflate MIT, jsdiff BSD-3).
+The acceptance-corpus suites (parser byte-fidelity, package round-trip over
+the fixture corpus, projection parity against the independent verification
+reader) run only when `DOCX_ACCEPTANCE_DIR` points at an acceptance folder;
+without it they are skipped and the synthetic suites still cover the
+invariants.
+
+The acceptance gate itself:
+
+```bash
+DOCX_ACCEPTANCE_DIR=… pnpm verify:acceptance
+```
+
+Design notes and research artifacts live in `research/` (gitignored).

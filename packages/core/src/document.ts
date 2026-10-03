@@ -24,8 +24,6 @@ import { ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildr
 import { normalizeDocx } from "./normalize.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
 
-const OUR_AUTHOR_PREFIX = "Scope Optimizer";
-
 /** the parsed document root is an XDoc; kid() works on it identically */
 const treeAsEl = (d: unknown) => d as XElement;
 
@@ -147,12 +145,12 @@ export class Document {
   }
 
   /**
-   * accept-with-member-wording: the flagged span reads as the original with
-   * the member's text in place of our revision. Tree-level, exact: removes our
-   * insertions, replaces the first deleted segment with the member wording,
+   * accept-with-caller-wording: the flagged span reads as the original with
+   * the caller's text in place of our revision. Tree-level, exact: removes our
+   * insertions, replaces the first deleted segment with the caller's wording,
    * and drops any further deleted segments.
    */
-  acceptWithWording(decision: Decision): number {
+  acceptWithText(decision: Decision): number {
     if (decision.text === undefined) return 0;
     let touched = 0;
     const byParagraph = new Map<XElement, { ins: XElement[]; dels: XElement[]; markIns: XElement | null }>();
@@ -189,7 +187,7 @@ export class Document {
         continue;
       }
       if (rec.markIns) {
-        // our inserted paragraph: strip the marks, put the member text in plain runs
+        // our inserted paragraph: strip the marks, put the caller's text in plain runs
         const firstIns = rec.ins[0];
         const rPr = firstIns ? cloneFirstRunPrFrom(firstIns) : null;
         let insertAt = para.children.length;
@@ -212,7 +210,7 @@ export class Document {
         touched++;
         continue;
       }
-      // insertion-only edits (empty-span replace): the member wording takes the
+      // insertion-only edits (empty-span replace): the caller's wording takes the
       // insertion's place, in the insertion's own parent (which may be a
       // hyperlink rather than the paragraph)
       if (rec.dels.length === 0 && rec.ins.length > 0) {
@@ -238,7 +236,7 @@ export class Document {
         touched++;
         continue;
       }
-      // replace/delete: member wording replaces the original span
+      // replace/delete: the caller's wording replaces the original span
       for (const ins of rec.ins) {
         const i = para.children.indexOf(ins);
         if (i >= 0) para.children.splice(i, 1);

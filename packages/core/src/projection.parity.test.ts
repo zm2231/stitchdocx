@@ -1,20 +1,24 @@
 // Projection parity: our projectParagraphs must agree with the independent
-// harness reader (imported here as an external oracle — test-only, never
-// shipped in the engine) on every fixture, under every accept/reject view.
+// verification reader (imported here as an external oracle — test-only, never
+// shipped in the engine) on every acceptance fixture, under every
+// accept/reject view. Runs only when DOCX_ACCEPTANCE_DIR points at the
+// acceptance folder.
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { describe, it, expect } from "vitest";
 import { decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { projectParagraphs, type View } from "./projection.js";
 
-// external oracle (JS without types), loaded from its local path
-const reader: {
-  project: (b: Uint8Array, v: unknown) => Array<Record<string, unknown>>;
-} = await import(join(homedir(), "Downloads", "scope-docx-engine-handoff", "harness", "ooxml.mjs"));
+const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
-const HANDOFF = process.env.STITCH_HANDOFF ?? join(homedir(), "Downloads", "scope-docx-engine-handoff");
+// external oracle (JS without types), loaded from its local path
+let reader: {
+  project: (b: Uint8Array, v: unknown) => Array<Record<string, unknown>>;
+};
+if (ACCEPTANCE) {
+  reader = await import(join(ACCEPTANCE, "harness", "ooxml.mjs"));
+}
 
 function* docxFiles(dir: string): Generator<string> {
   if (!existsSync(dir)) return;
@@ -25,13 +29,31 @@ function* docxFiles(dir: string): Generator<string> {
   }
 }
 
-const ours = (a: string | null) => (a ?? "").startsWith("Scope Optimizer");
+/** every revision author present in a fixture — the "ours" side of a view is
+ *  the document's own authors, so no author convention is assumed */
+function revisionAuthors(bytes: Uint8Array): Set<string> {
+  const entries = readPackage(bytes);
+  const tree = parseXml(decodePart(entries.get("word/document.xml")!));
+  const authors = new Set<string>();
+  const visit = (node: any): void => {
+    for (const c of node.children) {
+      if (c.kind !== "el") continue;
+      if (c.name === "w:ins" || c.name === "w:del" || c.name === "w:moveFrom" || c.name === "w:moveTo" || c.name.endsWith("PrChange")) {
+        const a = c.attrs.find((x: any) => x.name === "w:author");
+        if (a) authors.add(a.raw);
+      }
+      visit(c);
+    }
+  };
+  visit(tree);
+  return authors;
+}
 
-const VIEWS: Array<{ name: string; mine: View; reader: unknown }> = [
-  { name: "accept/accept", mine: (r) => (ours(r.author) ? "accept" : "accept"), reader: { ours: "accept", theirs: "accept" } },
-  { name: "reject/accept", mine: (r) => (ours(r.author) ? "reject" : "accept"), reader: { ours: "reject", theirs: "accept" } },
-  { name: "accept/reject", mine: (r) => (ours(r.author) ? "accept" : "reject"), reader: { ours: "accept", theirs: "reject" } },
-  { name: "reject/reject", mine: () => "reject", reader: { ours: "reject", theirs: "reject" } },
+const VIEWS: Array<{ name: string; mine: "accept" | "reject"; reader: "accept" | "reject" }> = [
+  { name: "accept/accept", mine: "accept", reader: "accept" },
+  { name: "reject/accept", mine: "reject", reader: "accept" },
+  { name: "accept/reject", mine: "accept", reader: "reject" },
+  { name: "reject/reject", mine: "reject", reader: "reject" },
 ];
 
 function ourProject(bytes: Uint8Array, view: View) {
@@ -44,16 +66,19 @@ function ourProject(bytes: Uint8Array, view: View) {
 const readerProject = (bytes: Uint8Array, v: unknown) =>
   (reader.project as (b: Uint8Array, v: unknown) => Array<Record<string, unknown>>)(bytes, v);
 
-describe("M2 projection parity vs harness reader", () => {
-  const fixtures = [...docxFiles(join(HANDOFF, "fixtures"))];
+const d = ACCEPTANCE ? describe : describe.skip;
+d("M2 projection parity vs verification reader" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"), () => {
+  const fixtures = [...docxFiles(join(ACCEPTANCE, "fixtures"))];
   it("fixtures present", () => expect(fixtures.length).toBeGreaterThan(20));
 
   for (const v of VIEWS) {
     it(`full projection matches under ${v.name} for every fixture`, () => {
       for (const docx of fixtures) {
         const bytes = new Uint8Array(readFileSync(docx));
-        const mine = ourProject(bytes, v.mine);
-        const theirs = readerProject(bytes, v.reader);
+        const authors = revisionAuthors(bytes);
+        const mineView: View = (r) => (authors.has(r.author ?? "") ? v.mine : v.reader);
+        const mine = ourProject(bytes, mineView);
+        const theirs = readerProject(bytes, { decide: (a: string) => (authors.has(a) ? v.mine : v.reader) });
         expect(mine.length, `${docx} [${v.name}] count`).toBe(theirs.length);
         for (let i = 0; i < mine.length; i++) {
           const m = mine[i]!;

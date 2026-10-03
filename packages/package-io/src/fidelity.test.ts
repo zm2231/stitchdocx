@@ -1,18 +1,17 @@
 // D1 spike: byte-fidelity of the hand-written parser over every XML part of
-// every handoff fixture, contrasted with a saxes-based tree (the reader's
+// every acceptance fixture, contrasted with a saxes-based tree (the reader's
 // parser), plus fuzz and timing. The decision: the hand-written parser is the
 // engine's XML layer (saxes resolves entities and normalizes forms, so it
-// cannot round-trip bytes).
+// cannot round-trip bytes). Runs only when DOCX_ACCEPTANCE_DIR points at the
+// acceptance folder.
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { describe, it, expect } from "vitest";
 import { SaxesParser } from "saxes";
 import { decodePart, readPackage } from "./zip.js";
 import { parseXml, serializeXml } from "./xml.js";
 
-const HANDOFF =
-  process.env.STITCH_HANDOFF ?? join(homedir(), "Downloads", "scope-docx-engine-handoff");
+const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
 function* docxFiles(dir: string): Generator<string> {
   if (!existsSync(dir)) return;
@@ -23,7 +22,7 @@ function* docxFiles(dir: string): Generator<string> {
   }
 }
 
-const fixtures = [...docxFiles(join(HANDOFF, "fixtures"))];
+const fixtures = [...docxFiles(join(ACCEPTANCE, "fixtures"))];
 const xmlParts = (docx: string): Array<[string, string]> => {
   const entries = readPackage(readFileSync(docx));
   return [...entries]
@@ -54,7 +53,8 @@ function saxesRoundTrip(xml: string): string {
   return root.children.map(ser).join("");
 }
 
-describe("D1 parser spike", () => {
+const d = ACCEPTANCE ? describe : describe.skip;
+d("D1 parser spike" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"), () => {
   it("hand-written parser: serialize(parse(x)) === x for every XML part of every fixture", () => {
     expect(fixtures.length).toBeGreaterThan(20);
     let parts = 0;

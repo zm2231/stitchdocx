@@ -39,7 +39,7 @@ function paraXml(xml: string, paraId: string): string {
   return xml.slice(at, xml.indexOf("</w:p>", at));
 }
 
-const insert = (addr: string, text: string): Op => ({ op: "insertParagraphAfter", author: AUTHOR, addr, text });
+const insert = (addr: string, text: string): Op => ({ op: "insertParagraphAfter", ref: "ins", author: AUTHOR, addr, text });
 
 describe("D1: inserted paragraph at the end of a container", () => {
   // the anchor 10000000 is the LAST paragraph of the body

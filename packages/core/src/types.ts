@@ -19,19 +19,21 @@ export type RevisionDecision =
   | { changeIds: string[]; decision: "accept" | "reject" }
   | { author: string; decision: "accept" | "reject" };
 
-/** wire-level decision (handoff API.md finalize contract) */
+/** finalize decision for one author: plain accept/reject, or accept with the
+ *  caller's replacement wording */
 export interface Decision {
-  flagId: string;
+  /** caller's id, echoed on the finalize result */
+  ref: string;
   author: string;
   decision: "accept" | "reject";
-  /** accept-with-member-wording (adapter-level finalize composition) */
+  /** accept-with-caller-wording (adapter-level finalize composition) */
   text?: string;
 }
 
 export type Op =
   | {
       op: "replace";
-      flagId: string;
+      ref: string;
       author: string;
       addr: Addr;
       start: number;
@@ -42,7 +44,7 @@ export type Op =
     }
   | {
       op: "delete";
-      flagId: string;
+      ref: string;
       author: string;
       addr: Addr;
       start: number;
@@ -51,7 +53,7 @@ export type Op =
     }
   | {
       op: "insertParagraphAfter";
-      flagId: string;
+      ref: string;
       author: string;
       addr: Addr;
       text: string;
@@ -72,7 +74,8 @@ export type RefusalReason =
 
 export interface Receipt {
   index: number;
-  flagId: string;
+  /** the op's ref, echoed */
+  ref: string;
   /** the op's author — binds every changeId to the revision identity that wrote it */
   author: string;
   status: "applied" | "refused";

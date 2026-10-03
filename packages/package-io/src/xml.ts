@@ -7,7 +7,7 @@
 //    byte-identically by construction.
 // 2. Namespace prefixes are matched literally as written ("w:p"). OOXML
 //    writers (Word, LibreOffice, Google Docs, this repo's fixtures) use the
-//    conventional prefixes; the harness reader does the same.
+//    conventional prefixes; Word does the same.
 // 3. Text nodes store the raw source (entities intact). Decoding happens only
 //    through decodedText()/getAttr(); newly created content is escaped on the
 //    way in and stored in escaped form.
@@ -318,9 +318,9 @@ function escapeMarkup(s: string): string {
 }
 
 /**
- * Decoded text as the spec-compliant harness reader sees it: literal CR/CRLF
- * in the source is normalized to LF at parse time, while character references
- * (&#13;) survive decoding as CR. Input is raw source text.
+ * Decoded text as Word reads it: literal CR/CRLF in the source is normalized
+ * to LF at parse time, while character references (&#13;) survive decoding as
+ * CR. Input is raw source text.
  */
 export function decodeText(raw: string): string {
   const normalized = raw.includes("\r") ? raw.replace(/\r\n?/g, "\n") : raw;

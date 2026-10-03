@@ -1,6 +1,9 @@
 {
   "name": "stitchdocx-worker-entry",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
-  "dependencies": { "@stitchdocx/core": "workspace:*" }
+  "dependencies": {
+    "@stitchdocx/core": "workspace:*"
+  }
 }

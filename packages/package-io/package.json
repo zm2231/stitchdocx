@@ -2,9 +2,16 @@
   "name": "@stitchdocx/package-io",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "main": "src/index.ts",
-  "scripts": { "build": "tsup src/index.ts --format esm --dts --out-dir dist" },
-  "dependencies": { "fflate": "^0.8.3" },
-  "devDependencies": { "saxes": "^6.0.0" }
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --out-dir dist"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "saxes": "^6.0.0"
+  }
 }

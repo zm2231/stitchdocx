@@ -1,16 +1,12 @@
 // Regression tests for the round-1 review findings — one test per ledger
 // Accept check. Builders construct minimal OOXML packages in-memory.
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { describe, it, expect } from "vitest";
 import { encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
 import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt } from "./index.js";
 import { buildSpanMap, checkSpan } from "./spanmap.js";
 import { wordEdits } from "./worddiff.js";
 import { paragraphText } from "./projection.js";
-
-const HANDOFF = process.env.STITCH_HANDOFF ?? join(homedir(), "Downloads", "scope-docx-engine-handoff");
 
 const DATE = "2026-10-03T00:00:00Z";
 
@@ -40,7 +36,7 @@ describe("review round 1 regression tests", () => {
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     const op = (flag: string, text: string): Op => ({
-      op: "replace", flagId: flag, author: `Scope Optimizer [${flag}]`, addr: "10000001",
+      op: "replace", ref: flag, author: `Reviewer A [${flag}]`, addr: "10000001",
       start: 16, end: 16, expectText: "", text,
     });
     const receipts = doc.apply([op("f1", "AAA "), op("f2", "BBB ")], { date: DATE });
@@ -51,7 +47,7 @@ describe("review round 1 regression tests", () => {
     expect(xml).not.toMatch(/<w:ins [^>]*><w:ins /);
     // independent reject of f1 leaves f2's text
     const doc2 = openDocument(out1);
-    doc2.decide([{ author: "Scope Optimizer [f1]", decision: "reject" }]);
+    doc2.decide([{ author: "Reviewer A [f1]", decision: "reject" }]);
     const text = doc2.projection().find((p) => p.addr === "10000001")!.text;
     expect(text).toContain("BBB ");
     expect(text).not.toContain("AAA ");
@@ -89,7 +85,7 @@ describe("review round 1 regression tests", () => {
     const before = doc.save();
     const { receipts } = (() => {
       const d2 = openDocument(norm);
-      const r = d2.apply([{ op: "delete", flagId: "f", author: "Scope Optimizer [f]", addr: para.addr!, start: 1, end: 3, expectText: "bc" }], { date: DATE });
+      const r = d2.apply([{ op: "delete", ref: "f", author: "Reviewer A [f]", addr: para.addr!, start: 1, end: 3, expectText: "bc" }], { date: DATE });
       return { receipts: r };
     })();
     expect(receipts[0]!.status).toBe("refused");
@@ -125,29 +121,29 @@ describe("review round 1 regression tests", () => {
     const body = P("10000001", R("Hold harmless the indemnified party under all claims."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    const receipts = doc.apply([{ op: "replace", flagId: "f", author: "Scope Optimizer [f]", addr: "10000001", start: 0, end: 13, expectText: "Hold harmless", text: "Indemnify" }], { date: DATE });
+    const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 0, end: 13, expectText: "Hold harmless", text: "Indemnify" }], { date: DATE });
     const out = doc.save();
     expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     // tamper: change the revision's author
     const entries = readPackage(out);
     let xml = new TextDecoder().decode(entries.get("word/document.xml")!);
-    xml = xml.replace('w:author="Scope Optimizer [f]"', 'w:author="Other Author"');
+    xml = xml.replace('w:author="Reviewer A [f]"', 'w:author="Other Author"');
     entries.set("word/document.xml", encodePart(xml));
     const tampered = writePackage(entries);
     expect(verifyOutput(norm, tampered, receipts).ok).toBe(false);
   });
 
-  it("V2: acceptWith on an insertion-only edit inserts the member wording", () => {
+  it("V2: acceptWith on an insertion-only edit inserts the caller wording", () => {
     const body = P("10000001", R("Payments begin on the start date."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    doc.apply([{ op: "replace", flagId: "f", author: "Scope Optimizer [f]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
-    doc.acceptWithWording({ flagId: "f", author: "Scope Optimizer [f]", decision: "accept", text: "BBB " });
+    doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
+    doc.acceptWithText({ ref: "f", author: "Reviewer A [f]", decision: "accept", text: "BBB " });
     const text = doc.projection().find((p) => p.addr === "10000001")!.text;
     // offset 16 sits after the first "o" of "on": original text with BBB at 16
     expect(text).toBe("Payments begin oBBB n the start date.");
     const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
-    expect(xml).not.toContain("Scope Optimizer");
+    expect(xml).not.toContain("Reviewer A");
   });
 
   it("V3: decide resolves move and property-change revisions by exact author, leaving others untouched", () => {
@@ -168,7 +164,7 @@ describe("review round 1 regression tests", () => {
     const body = P("10000001", R("The fee is due."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    const receipts = doc.apply([{ op: "replace", flagId: "f", author: "Scope Optimizer [f]", addr: "10000001", start: 4, end: 7, expectText: "fee", text: "charge" }], { date: DATE });
+    const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 4, end: 7, expectText: "fee", text: "charge" }], { date: DATE });
     const ids = receipts[0]!.changeIds;
     const doc2 = openDocument(doc.save());
     const decideReceipts = doc2.decide([{ changeIds: ids, decision: "reject" }]);
@@ -180,7 +176,7 @@ describe("review round 1 regression tests", () => {
     const body = P("10000001", R("Rate card:"));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    const receipts = doc.apply([{ op: "replace", flagId: "f", author: "Scope Optimizer [f]", addr: "10000001", start: 0, end: 9, expectText: "Rate card", text: "Rates\u0001\r\n2026" }], { date: DATE });
+    const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 0, end: 9, expectText: "Rate card", text: "Rates\u0001\r\n2026" }], { date: DATE });
     expect(receipts[0]!.status).toBe("applied");
     const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
     expect(xml).not.toContain("\u0001");
@@ -226,7 +222,7 @@ describe("review round 1 regression tests", () => {
   it("RM2: a point at a pre-existing client revision refuses span_overlaps_revision even with a matching author", () => {
     const body = P("10000001",
       R("Payment terms: ") +
-      `<w:ins w:id="50" w:author="Scope Optimizer [clientlookalike]" w:date="${DATE}">` + R("net sixty") + `</w:ins>` + R("."));
+      `<w:ins w:id="50" w:author="Reviewer A [clientlookalike]" w:date="${DATE}">` + R("net sixty") + `</w:ins>` + R("."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     const para = doc.projectionRecords()[0]!;
@@ -236,7 +232,7 @@ describe("review round 1 regression tests", () => {
     // ownedRevisions is empty at validation: nothing from this call exists yet
     void issue;
     const receipts = doc.apply([
-      { op: "replace", flagId: "f", author: "Scope Optimizer [clientlookalike]", addr: "10000001", start: 15, end: 15, expectText: "", text: "X" },
+      { op: "replace", ref: "f", author: "Reviewer A [clientlookalike]", addr: "10000001", start: 15, end: 15, expectText: "", text: "X" },
     ], { date: DATE });
     expect(receipts[0]!.status).toBe("refused");
     expect(receipts[0]!.reason).toBe("span_overlaps_revision");
@@ -244,12 +240,12 @@ describe("review round 1 regression tests", () => {
 
   it("RM2: attribute values normalize literal CR/CRLF/TAB like the spec parser (author parity)", () => {
     const body = `<w:p w14:paraId="10000001">` +
-      `<w:ins w:id="7" w:author="Scope
-Optimizer [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
+      `<w:ins w:id="7" w:author="Reviewer
+A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       R(" tail") + `</w:p>`;
     const doc = openDocument(docx(body));
     const rec = doc.projectionRecords()[0]!;
-    const text = paragraphText(rec.node, (rev) => (rev.author === "Scope Optimizer [f]" ? "reject" : "accept"));
+    const text = paragraphText(rec.node, (rev) => (rev.author === "Reviewer A [f]" ? "reject" : "accept"));
     expect(text).toBe(" tail"); // the wrapped-author insertion is recognized and rejected
   });
 
@@ -258,9 +254,9 @@ Optimizer [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     // call 1: point insertion at offset 16
-    doc.apply([{ op: "replace", flagId: "f1", author: "Scope Optimizer [f1]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
+    doc.apply([{ op: "replace", ref: "f1", author: "Reviewer A [f1]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
     // call 2: point edit inside call 1's inserted text must refuse
-    const receipts = doc.apply([{ op: "replace", flagId: "f2", author: "Scope Optimizer [f2]", addr: "10000001", start: 18, end: 18, expectText: "", text: "BBB " }], { date: DATE });
+    const receipts = doc.apply([{ op: "replace", ref: "f2", author: "Reviewer A [f2]", addr: "10000001", start: 18, end: 18, expectText: "", text: "BBB " }], { date: DATE });
     expect(receipts[0]!.status).toBe("refused");
     expect(receipts[0]!.reason).toBe("span_overlaps_revision");
   });
@@ -270,25 +266,25 @@ Optimizer [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     const receipts = doc.apply([
-      { op: "replace", flagId: "a", author: "Scope Optimizer [a]", addr: "10000001", start: 0, end: 5, expectText: "Alpha", text: "ALPHA" },
-      { op: "replace", flagId: "b", author: "Scope Optimizer [b]", addr: "10000001", start: 6, end: 10, expectText: "beta", text: "BETA" },
+      { op: "replace", ref: "a", author: "Reviewer A [a]", addr: "10000001", start: 0, end: 5, expectText: "Alpha", text: "ALPHA" },
+      { op: "replace", ref: "b", author: "Reviewer A [b]", addr: "10000001", start: 6, end: 10, expectText: "beta", text: "BETA" },
     ], { date: DATE });
     const out = doc.save();
     expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     // swap the two flags' authors in the output markup
     const entries = readPackage(out);
     let xml = new TextDecoder().decode(entries.get("word/document.xml")!);
-    xml = xml.replace("Scope Optimizer [a]", "Scope Optimizer [TMP]").replace("Scope Optimizer [b]", "Scope Optimizer [a]").replace("Scope Optimizer [TMP]", "Scope Optimizer [b]");
+    xml = xml.replace("Reviewer A [a]", "Reviewer A [TMP]").replace("Reviewer A [b]", "Reviewer A [a]").replace("Reviewer A [TMP]", "Reviewer A [b]");
     entries.set("word/document.xml", encodePart(xml));
     expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
   });
 
-  it("V2: insertion-only member wording inside a hyperlink stays in place", () => {
+  it("V2: insertion-only caller wording inside a hyperlink stays in place", () => {
     const body = P("10000001", R("A") + `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1">` + R("BC") + `</w:hyperlink>` + R("D"));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    doc.apply([{ op: "replace", flagId: "f", author: "Scope Optimizer [f]", addr: "10000001", start: 2, end: 2, expectText: "", text: "X" }], { date: DATE });
-    doc.acceptWithWording({ flagId: "f", author: "Scope Optimizer [f]", decision: "accept", text: "Y" });
+    doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 2, end: 2, expectText: "", text: "X" }], { date: DATE });
+    doc.acceptWithText({ ref: "f", author: "Reviewer A [f]", decision: "accept", text: "Y" });
     expect(doc.projection()[0]!.text).toBe("ABYCD");
   });
 
