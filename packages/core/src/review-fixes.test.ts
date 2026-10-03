@@ -150,15 +150,17 @@ describe("review round 1 regression tests", () => {
     expect(xml).not.toContain("Scope Optimizer");
   });
 
-  it("V3: finalize sweep removes move and property-change revisions under the prefix", () => {
+  it("V3: decide resolves move and property-change revisions by exact author, leaving others untouched", () => {
     const body = P("10000001",
-      `<w:moveFrom w:id="90" w:author="Scope Optimizer [legacy]" w:date="${DATE}">` + R("gone") + `</w:moveFrom>` +
-      `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Scope Optimizer [legacy]" w:date="${DATE}"><w:rPr/></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
+      `<w:moveFrom w:id="90" w:author="Ours [legacy]" w:date="${DATE}">` + R("gone") + `</w:moveFrom>` +
+      `<w:moveFrom w:id="92" w:author="Client Author" w:date="${DATE}">` + R("theirs") + `</w:moveFrom>` +
+      `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Ours [legacy]" w:date="${DATE}"><w:rPr/></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));
-    const swept = doc.decideByPrefix("Scope Optimizer", "reject");
-    expect(swept).toBeGreaterThanOrEqual(2);
+    const resolved = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
+    expect(resolved[0]!.changeIds.sort()).toEqual(["90", "91"]);
     const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
-    expect(xml).not.toContain("Scope Optimizer");
+    expect(xml).not.toContain("Ours [legacy]");
+    expect(xml).toContain("Client Author"); // D3: revisions we never wrote survive
     expect(xml).toContain("gone"); // reject moveFrom restores the text
   });
 
@@ -291,12 +293,12 @@ Optimizer [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
   });
 
   it("V3: rejecting a property change restores the saved props (no merge)", () => {
-    const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Scope Optimizer [legacy]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
+    const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Ours [legacy]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));
-    doc.decideByPrefix("Scope Optimizer", "reject");
+    doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
     const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
     expect(xml).toContain("<w:i/>");
     expect(xml).not.toContain("<w:b/>");
-    expect(xml).not.toContain("Scope Optimizer");
+    expect(xml).not.toContain("Ours [legacy]");
   });
 });

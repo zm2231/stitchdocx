@@ -53,6 +53,9 @@ try {
       const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: Decision[] };
       const doc = openDocument(new Uint8Array(readFileSync(inp)));
       const results: Array<{ flagId: string; author: string; decision: string; resolved: number }> = [];
+      // resolve exactly the authors named in the decisions — revisions by
+      // anyone else (including earlier runs' work in a re-uploaded redline)
+      // must survive untouched
       for (const d of spec.decisions ?? []) {
         if (d.text !== undefined) {
           const resolved = doc.acceptWithWording(d);
@@ -64,10 +67,8 @@ try {
           results.push({ flagId: d.flagId, author: d.author, decision: d.decision, resolved });
         }
       }
-      // sweep: no revision by any of our authors may remain (undecided flags default to reject)
-      const swept = doc.decideByPrefix("Scope Optimizer", "reject");
       writeFileSync(outp, doc.save());
-      out({ results, swept });
+      out({ results });
       break;
     }
     case "verify": {

@@ -147,22 +147,6 @@ export class Document {
   }
 
   /**
-   * Reject/accept every revision whose author starts with `prefix`, across all
-   * revision kinds (ins/del/moves/property changes).
-   */
-  decideByPrefix(prefix: string, decision: "accept" | "reject"): number {
-    const authors = new Set<string>();
-    for (const rev of allRevisions(this.root)) {
-      const a = getAttr(rev, "w:author");
-      if (a && a.startsWith(prefix)) authors.add(a);
-    }
-    let n = 0;
-    for (const a of authors) n += resolveRevisions(this.root, (rev) => getAttr(rev, "w:author") === a, decision);
-    if (n > 0) this.markDirty();
-    return n;
-  }
-
-  /**
    * accept-with-member-wording: the flagged span reads as the original with
    * the member's text in place of our revision. Tree-level, exact: removes our
    * insertions, replaces the first deleted segment with the member wording,
@@ -188,6 +172,22 @@ export class Document {
       byParagraph.set(paragraph, rec);
     }
     for (const [para, rec] of byParagraph) {
+      if (rec.markIns && rec.ins.length === 0) {
+        // container-end insert form (Word's): the tracked mark sits on the
+        // ANCHOR paragraph and the inserted paragraph follows it with a
+        // w:pPrChange. Accepting the wording restores the anchor by just
+        // removing the mark; the inserted paragraph is handled by its own
+        // record below.
+        const pPr = kid(para, "w:pPr");
+        const rPrEl = pPr ? kid(pPr, "w:rPr") : undefined;
+        if (rPrEl) {
+          const mark = kids(rPrEl).find((c) => REVISION_NAMES.has(c.name));
+          if (mark) removeChildEl(rPrEl, mark);
+          if (rPrEl.children.length === 0 && pPr) removeChildEl(pPr, rPrEl);
+        }
+        touched++;
+        continue;
+      }
       if (rec.markIns) {
         // our inserted paragraph: strip the marks, put the member text in plain runs
         const firstIns = rec.ins[0];
@@ -229,6 +229,12 @@ export class Document {
         const run = makeRun(rPr, textToRunChildren(decision.text!));
         parent.children.splice(Math.min(insertAt, parent.children.length), 0, run);
         run.parent = parent;
+        // a container-end insert records the anchor's original paragraph
+        // properties in a w:pPrChange; with the wording in place that record
+        // is resolved too
+        const pPr = kid(para, "w:pPr");
+        const change = pPr ? kids(pPr).find((c) => c.name === "w:pPrChange" && getAttr(c, "w:author") === decision.author) : undefined;
+        if (change && pPr) removeChildEl(pPr, change);
         touched++;
         continue;
       }
