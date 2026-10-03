@@ -39,8 +39,6 @@ export class Document {
   private paraIds: ParaIdAllocator;
   private originalBytes: Uint8Array;
   private dirty = false;
-  /** revision elements created by this Document instance's apply calls */
-  private ownedRevisions = new Set<XElement>();
   private numbering?: NumberingModel;
 
   private constructor(bytes: Uint8Array) {
@@ -103,7 +101,9 @@ export class Document {
       ids: this.ids,
       paraIds: this.paraIds,
       date: opts.date,
-      ownedRevisions: this.ownedRevisions,
+      // ownership is scoped to THIS apply batch: revisions from earlier calls
+      // are pre-existing tracked changes and must refuse, not reposition
+      ownedRevisions: new Set<XElement>(),
     };
     const receipts = executeApply(deps, ops);
     if (receipts.some((r) => r.status === "applied")) this.markDirty();

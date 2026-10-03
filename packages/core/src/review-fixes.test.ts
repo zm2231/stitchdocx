@@ -251,6 +251,18 @@ Optimizer [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(text).toBe(" tail"); // the wrapped-author insertion is recognized and rejected
   });
 
+  it("RM6: revision ownership does not leak across separate apply calls", () => {
+    const body = P("10000001", R("Payments begin on the start date."));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    // call 1: point insertion at offset 16
+    doc.apply([{ op: "replace", flagId: "f1", author: "Scope Optimizer [f1]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
+    // call 2: point edit inside call 1's inserted text must refuse
+    const receipts = doc.apply([{ op: "replace", flagId: "f2", author: "Scope Optimizer [f2]", addr: "10000001", start: 18, end: 18, expectText: "", text: "BBB " }], { date: DATE });
+    expect(receipts[0]!.status).toBe("refused");
+    expect(receipts[0]!.reason).toBe("span_overlaps_revision");
+  });
+
   it("V1: swapping authors between two flags fails verify", () => {
     const body = P("10000001", R("Alpha beta gamma delta."));
     const { docx: norm } = normalizeDocx(docx(body));
