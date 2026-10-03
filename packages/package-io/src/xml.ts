@@ -65,17 +65,18 @@ export function parseXml(source: string): XDoc {
   // enforced by matching end tags to the innermost open element
   const stack: XElement[] = [];
   const push = (n: XNode): void => {
+    if (n.kind === "el") n.parent = stack.length ? stack[stack.length - 1]! : null;
     if (stack.length) stack[stack.length - 1]!.children.push(n);
     else children.push(n);
   };
   let i = 0;
   const s = source;
 
-  const fail = (msg: string): never => {
+  function fail(msg: string): never {
     const line = s.slice(0, i).split("\n").length;
     const col = i - (s.lastIndexOf("\n", i - 1) + 1) + 1;
     throw new Error(`xml parse at ${line}:${col}: ${msg}`);
-  };
+  }
 
   if (s.startsWith("\uFEFF")) {
     push({ kind: "raw", raw: "\uFEFF" });
@@ -292,6 +293,9 @@ export function decodeEntities(raw: string): string {
 export function encodeText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
+/** alias used by consumers that escape run text */
+export const encodeTextSafe = encodeText;
 
 /** escaped form for an attribute value; caller supplies the quote in use */
 export function encodeAttrValue(text: string, q: '"' | "'"): string {

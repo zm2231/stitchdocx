@@ -44,7 +44,7 @@ function saxesRoundTrip(xml: string): string {
   p.on("closetag", (t: any) => {
     if (!t.isSelfClosing) stack.pop();
   });
-  p.on("text", (v: string) => stack[stack.length - 1].children.push({ text: v }));
+  p.on("text", (v: string) => stack[stack.length - 1]!.children.push({ text: v }));
   p.write(xml).close();
   const ser = (n: any): string => {
     if ("text" in n) return n.text.replace(/&/g, "&amp;").replace(/</g, "&lt;");

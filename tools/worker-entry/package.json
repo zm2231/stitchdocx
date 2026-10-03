@@ -1,0 +1,6 @@
+{
+  "name": "stitchdocx-worker-entry",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@stitchdocx/core": "workspace:*" }
+}
