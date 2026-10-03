@@ -291,15 +291,42 @@ export function decodeEntities(raw: string): string {
 
 /** escaped form stored inside a text node (quote-free context) */
 export function encodeText(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escapeMarkup(normalizeXmlText(text));
 }
 
 /** alias used by consumers that escape run text */
 export const encodeTextSafe = encodeText;
 
+/**
+ * Engine-authored text must be valid XML character data: normalize CR/CRLF to
+ * LF (spec parser behavior) and strip characters XML 1.0 cannot represent
+ * (control chars, lone surrogates, non-characters). Applied only on authored
+ * content — parsed raw text is preserved verbatim.
+ */
+export function normalizeXmlText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+}
+
+function escapeMarkup(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Decoded text as the spec-compliant harness reader sees it: literal CR/CRLF
+ * in the source is normalized to LF at parse time, while character references
+ * (&#13;) survive decoding as CR. Input is raw source text.
+ */
+export function decodeText(raw: string): string {
+  const normalized = raw.includes("\r") ? raw.replace(/\r\n?/g, "\n") : raw;
+  return decodeEntities(normalized);
+}
+
 /** escaped form for an attribute value; caller supplies the quote in use */
 export function encodeAttrValue(text: string, q: '"' | "'"): string {
-  let out = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let out = escapeMarkup(normalizeXmlText(text));
   if (q === '"') out = out.replace(/"/g, "&quot;");
   else out = out.replace(/'/g, "&apos;");
   return out;
@@ -366,9 +393,9 @@ export function rawNode(raw: string): XRaw {
 }
 
 export function setChildren(el: XElement, children: XNode[]): void {
+  for (const c of el.children) if (c.kind === "el" && !children.includes(c)) c.parent = null;
   el.children = children;
   el.selfClosing = false;
-  el.attrsDirty = el.attrsDirty; // rawOpen unchanged (attributes untouched)
   reassignParents(el);
 }
 
@@ -389,6 +416,7 @@ export function removeChild(child: XNode): void {
   if (!p) return;
   const i = p.children.indexOf(child);
   if (i >= 0) p.children.splice(i, 1);
+  if (child.kind === "el") child.parent = null; // detached: parent pointer must not dangle
 }
 
 /** fix parent pointers of an element's direct children after structural edits */

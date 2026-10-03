@@ -1,7 +1,7 @@
 // Span map: the paragraph's visible text tiled into char pieces, each tied to
 // the run that produced it, with the ancestry metadata the refusal checks need
 // (revision, hyperlink/smartTag structure, inline content control, field).
-import { decodeEntities, type XElement } from "@stitchdocx/package-io";
+import { decodeEntities, decodeText, type XElement } from "@stitchdocx/package-io";
 import { walkContent, type CharKind, type View } from "./projection.js";
 
 export interface SpanPiece {
@@ -51,7 +51,7 @@ export function buildSpanMap(p: XElement, view: View): SpanMap {
 function textOfCharEl(el: XElement): string {
   let out = "";
   for (const c of el.children) {
-    if (c.kind === "text") out += decodeEntities(c.raw); // decoded: offsets live in text space
+    if (c.kind === "text") out += decodeText(c.raw); // decoded + CR-normalized: offsets live in projection text space
     else if (c.kind === "raw" && c.raw.startsWith("<![CDATA[")) out += c.raw.slice(9, -3);
   }
   return out;
@@ -82,37 +82,53 @@ export interface SpanIssue {
 }
 
 /**
- * Refusal checks over [start,end) in paragraph-text coordinates. Check order
- * is contract-relevant: a span that both overlaps a prior op and crosses a
- * structure is reported as span_overlaps_prior_op (S12/S17).
+ * Refusal checks over [start,end) in paragraph-text coordinates. Predicates
+ * are collected over every covered piece first, then decided in the contract's
+ * priority order (API.md refusal table): overlaps_revision, overlaps_prior_op,
+ * crosses_structure, in_field, in_content_control — a per-piece first-hit
+ * would misreport (e.g. a span crossing into a field result inside a
+ * hyperlink must refuse crosses_structure, not in_field).
  */
-export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Array<{ start: number; end: number }>): SpanIssue | null {
-  // 1. overlap with earlier ops in the same call (original coordinates)
+export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Array<{ start: number; end: number }>, priorAuthors: ReadonlySet<string> = new Set()): SpanIssue | null {
+  const covered = map.pieces.filter((pc) => pc.start < end && pc.end > start);
+  let hasRev = false;
+  let hasField = false;
+  let hasSdt = false;
+  const structures = new Set<XElement | null>();
+  const parents = new Set<XElement | null>();
+  for (const pc of covered) {
+    const info = map.runInfo.get(pc.run)!;
+    if (info.rev) hasRev = true;
+    if (pc.inFieldResult) hasField = true;
+    if (info.inlineSdt) hasSdt = true;
+    structures.add(info.structure);
+    parents.add(pc.run.parent);
+  }
+  if (hasRev) return { reason: "span_overlaps_revision" };
   for (const pr of priorOps) {
     if (start < pr.end && pr.start < end) return { reason: "span_overlaps_prior_op" };
   }
+  // mutation safety: every covered run must share one parent (an unmodelled
+  // inline wrapper such as w:customXml would otherwise be partially deleted)
+  if (parents.size > 1 || structures.size > 1) return { reason: "span_crosses_structure" };
+  if (hasField) return { reason: "span_in_field" };
+  if (hasSdt) return { reason: "span_in_content_control" };
   if (start === end) {
-    // pure insertion at a point: refused only where even the surrounding run is untouchable
-    const pc = pieceAt(map, start);
-    if (pc) {
+    // point insertion: the surrounding run's own revision is refused unless it
+    // is one of this call's prior ops (those get sibling placement instead)
+    const pc = covered[0] ?? pieceAt(map, start);
+    if (pc && start >= pc.start && start < pc.end) {
       const info = map.runInfo.get(pc.run)!;
-      if (pc.inFieldResult) return { reason: "span_in_field" };
-      if (info.inlineSdt) return { reason: "span_in_content_control" };
+      const author = info.rev ? authorOf(info.rev) : null;
+      if (info.rev && !priorAuthors.has(author ?? "")) return { reason: "span_overlaps_revision" };
     }
-    return null;
-  }
-  // 2. any covered char inside a tracked revision (client's or ours)
-  let structure: XElement | null | undefined = undefined;
-  for (const pc of map.pieces) {
-    if (pc.end <= start || pc.start >= end) continue;
-    const info = map.runInfo.get(pc.run)!;
-    if (info.rev) return { reason: "span_overlaps_revision" };
-    if (pc.inFieldResult) return { reason: "span_in_field" };
-    if (info.inlineSdt) return { reason: "span_in_content_control" };
-    if (structure === undefined) structure = info.structure;
-    else if (structure !== info.structure) return { reason: "span_crosses_structure" };
   }
   return null;
+}
+
+function authorOf(rev: XElement): string {
+  const a = rev.attrs.find((x) => x.name === "w:author");
+  return a ? decodeEntities(a.raw) : "";
 }
 
 /** offset -> the piece covering it (or the next piece at/after it) */

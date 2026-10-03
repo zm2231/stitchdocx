@@ -5,7 +5,7 @@
 //
 // One walker serves two consumers: paragraphText (projection) and the span
 // map (mutation input), so text and offsets can never disagree.
-import { decodeEntities, kid, kids, type XElement } from "@stitchdocx/package-io";
+import { decodeEntities, decodeText, kid, kids, type XElement } from "@stitchdocx/package-io";
 import { walkBody, type BodyContext, type BodyWalk } from "./body.js";
 
 export const REVISION_NAMES = new Set(["w:ins", "w:del", "w:moveFrom", "w:moveTo"]);
@@ -28,11 +28,11 @@ export function visibleRev(rev: XElement, view: View): boolean {
   return isInsertion(rev.name) ? decision === "accept" : decision === "reject";
 }
 
-/** decoded character data of an element's text children (entities and CDATA resolved) */
+/** decoded character data of an element's text children — CR-normalized like the spec parser */
 export function textContent(el: XElement): string {
   let out = "";
   for (const c of el.children) {
-    if (c.kind === "text") out += decodeEntities(c.raw);
+    if (c.kind === "text") out += decodeText(c.raw);
     else if (c.kind === "raw" && c.raw.startsWith("<![CDATA[")) out += c.raw.slice(9, -3);
   }
   return out;

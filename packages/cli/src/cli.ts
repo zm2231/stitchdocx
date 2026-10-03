@@ -4,7 +4,7 @@
 // built-ins appear. Every command prints one JSON object and exits 0; a
 // non-zero exit means the engine itself failed (refusals are not failures).
 import { readFileSync, writeFileSync } from "node:fs";
-import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision } from "@stitchdocx/core";
+import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision, type RevisionDecision } from "@stitchdocx/core";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -30,7 +30,10 @@ try {
     case "paragraphs": {
       const [inp] = args;
       if (!inp) fail("usage: paragraphs <in.docx>");
-      const doc = openDocument(new Uint8Array(readFileSync(inp)));
+      // normalize in memory first: every projected paragraph carries a valid
+      // address (the stored file is not rewritten — paragraphs is read-only)
+      const { docx } = normalizeDocx(new Uint8Array(readFileSync(inp)));
+      const doc = openDocument(docx);
       out({ paragraphs: doc.projection() });
       break;
     }
@@ -49,20 +52,22 @@ try {
       if (!inp || !decPath || !outp) fail("usage: finalize <in.docx> <decisions.json> <out.docx>");
       const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: Decision[] };
       const doc = openDocument(new Uint8Array(readFileSync(inp)));
-      const results: Array<{ flagId?: string; author: string; decision: string; resolved: number }> = [];
+      const results: Array<{ flagId: string; author: string; decision: string; resolved: number }> = [];
       for (const d of spec.decisions ?? []) {
         if (d.text !== undefined) {
           const resolved = doc.acceptWithWording(d);
           results.push({ flagId: d.flagId, author: d.author, decision: "accept", resolved });
         } else {
-          const resolved = doc.decide([d]);
+          const engineDecision: RevisionDecision = { author: d.author, decision: d.decision };
+          const receipts = doc.decide([engineDecision]);
+          const resolved = receipts.reduce((n, r) => n + r.changeIds.length, 0);
           results.push({ flagId: d.flagId, author: d.author, decision: d.decision, resolved });
         }
       }
       // sweep: no revision by any of our authors may remain (undecided flags default to reject)
-      results.push({ author: "<sweep>", decision: "reject", resolved: doc.decideByPrefix("Scope Optimizer", "reject") });
+      const swept = doc.decideByPrefix("Scope Optimizer", "reject");
       writeFileSync(outp, doc.save());
-      out({ results });
+      out({ results, swept });
       break;
     }
     case "verify": {

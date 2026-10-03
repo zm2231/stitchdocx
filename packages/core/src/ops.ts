@@ -4,6 +4,7 @@
 // original text coordinates — stay valid without adjustment.
 import {
   cloneNode,
+  decodeEntities,
   el,
   setAttr,
   textNode,
@@ -45,7 +46,11 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
   const plans: Plan[] = ops.map((op, index) => ({ op, index, status: "applied" }));
   const maps = new Map<Addr, SpanMap>();
   const priorApplied = new Map<Addr, Array<{ start: number; end: number }>>();
+  const authorsBefore = new Map<number, Set<string>>(); // op index -> authors of earlier ops
+  const seenAuthors = new Set<string>();
   for (const plan of plans) {
+    authorsBefore.set(plan.index, new Set(seenAuthors));
+    if (plan.op.author) seenAuthors.add(plan.op.author);
     const op = plan.op;
     const para = deps.paraByAddr.get(op.addr);
     if (!para) {
@@ -76,7 +81,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       refuse(plan, "empty_text");
       continue;
     }
-    const issue = checkSpan(map, op.start, op.end, priorApplied.get(op.addr) ?? []);
+    const issue = checkSpan(map, op.start, op.end, priorApplied.get(op.addr) ?? [], authorsBefore.get(plan.index));
     if (issue) {
       refuse(plan, issue.reason);
       continue;
@@ -106,7 +111,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       return pb.start - pa.start;
     });
     for (const plan of list) {
-      changeIdsByIndex.set(plan.index, applySpanOp(deps, para, plan.op as SpanOp));
+      changeIdsByIndex.set(plan.index, applySpanOp(deps, para, plan.op as SpanOp, authorsBefore.get(plan.index) ?? new Set()));
     }
   }
   const insertChains = new Map<XElement, XElement>();
@@ -183,7 +188,7 @@ function hasAncestor(p: XElement, name: string): boolean {
 
 type SpanOp = Extract<Op, { op: "replace" }> | Extract<Op, { op: "delete" }>;
 
-function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
+function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, authorsBefore: ReadonlySet<string>): string[] {
   if (op.op === "delete") return applyDeletion(deps, para, op.start, op.end, op.author).ids;
   if (op.granularity === "word") {
     const ids: string[] = [];
@@ -199,7 +204,7 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
         ids.push(...applyDeletion(deps, para, op.start + e.delStart, op.start + e.delEnd, op.author).ids);
       }
       if (e.insAt !== undefined && e.insText) {
-        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author, null));
+        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author, null, authorsBefore));
       }
     }
     return ids;
@@ -212,7 +217,7 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
     return [...del.ids, insId];
   }
   // pure insertion (empty span)
-  return [applyPointInsertion(deps, para, op.start, op.text, op.author, null)];
+  return [applyPointInsertion(deps, para, op.start, op.text, op.author, null, authorsBefore)];
 }
 
 interface DeletionResult {
@@ -235,6 +240,11 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   const runs: XElement[] = [];
   for (const pc of covered) if (!runs.includes(pc.run)) runs.push(pc.run);
   if (runs.length === 0) return { ids: [], firstRunPr: null, lastDelEl: null };
+  // defense in depth (checkSpan already gates this): refuse to mutate when the
+  // covered runs do not share one parent — partial deletions are forbidden
+  if (new Set(runs.map((r) => r.parent)).size > 1) {
+    throw new Error("mutation safety: covered runs span multiple parents");
+  }
   const firstRunPr = cloneRunPr(runs[0]!);
 
   // contiguous sibling segments (bookmark/comment markers between runs split
@@ -294,7 +304,7 @@ function insertInsEl(deps: ApplyDeps, afterEl: XElement, text: string, author: s
 }
 
 /** point insertion at a text offset (word-diff insertions, empty-span replace) */
-function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string, rPr: XElement | null): string {
+function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string, rPr: XElement | null, authorsBefore: ReadonlySet<string>): string {
   const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
   const run = makeRun(rPr, textToRunChildren(text));
   ins.children.push(run);
@@ -304,18 +314,32 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
   splitAt(map, at);
   map = buildSpanMap(para, acceptAllView);
   const pc = pieceAt(map, at);
+  let parent: XElement;
+  let index: number;
   if (pc && pc.start >= at) {
-    const parent = pc.run.parent!;
-    parent.children.splice(parent.children.indexOf(pc.run), 0, ins);
-    ins.parent = parent;
+    parent = pc.run.parent!;
+    index = parent.children.indexOf(pc.run);
   } else if (pc) {
-    const parent = pc.run.parent!;
-    parent.children.splice(parent.children.indexOf(pc.run) + 1, 0, ins);
-    ins.parent = parent;
+    parent = pc.run.parent!;
+    index = parent.children.indexOf(pc.run) + 1;
   } else {
-    para.children.push(ins);
-    ins.parent = para;
+    parent = para;
+    index = para.children.length;
   }
+  // sibling climb: a point that lands inside a prior op's inserted region must
+  // stay OUT of that revision — place the new ins beside it, never nested
+  // (checkSpan already refuses points inside revisions this call does not own)
+  const rev = pc ? map.runInfo.get(pc.run)?.rev : null;
+  if (rev && rev.parent) {
+    const revAuthor = rev.attrs.find((a) => a.name === "w:author");
+    const ownable = !revAuthor || authorsBefore.has(decodeEntities(revAuthor.raw));
+    if (ownable) {
+      parent = rev.parent;
+      index = parent.children.indexOf(rev) + (pc && pc.start < at ? 1 : 0);
+    }
+  }
+  parent.children.splice(index, 0, ins);
+  ins.parent = parent;
   return ins.attrs.find((a) => a.name === "w:id")!.raw;
 }
 

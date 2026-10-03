@@ -2,10 +2,13 @@
 // receipts claim: every applied receipt's changeIds exist, rejecting them
 // yields `before`, accepting them yields `after`, and no other paragraph
 // differs. Tampering anywhere fails.
-import { decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
+import { decodeEntities, decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { acceptAll, paragraphText, projectParagraphs, type View } from "./projection.js";
 import type { Addr, Receipt } from "./types.js";
+
+/** the adapter namespace: receipt revisions must be authored under it */
+export const OUR_AUTHOR_PREFIX = "Scope Optimizer";
 export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts: Receipt[]): { ok: boolean; failures: string[] } {
   const failures: string[] = [];
   const origDoc = openForVerify(original);
@@ -19,15 +22,17 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
   const origAddrs = origRecords.map((r) => r.addr ?? "");
   const origAddrSet = new Set(origAddrs);
 
-  // existing revision ids in the output (for changeId existence checks)
-  const outRevIds = new Set<string>();
-  collectRevisionIds(outDoc.root, outRevIds);
+  // existing revision ids → authors in the output (for receipt identity checks)
+  const outRevAuthors = new Map<string, string>();
+  collectRevisionAuthors(outDoc.root, outRevAuthors);
 
   const insertAddrs = new Set<string>();
   for (const r of applied) {
     if (!r.changeIds?.length) failures.push(`applied receipt ${r.index} reports no change ids`);
     for (const id of r.changeIds ?? []) {
-      if (!outRevIds.has(String(id))) failures.push(`receipt ${r.index} change id ${id} not in document`);
+      const author = outRevAuthors.get(String(id));
+      if (author === undefined) failures.push(`receipt ${r.index} change id ${id} not in document`);
+      else if (!author.startsWith(OUR_AUTHOR_PREFIX)) failures.push(`receipt ${r.index} change id ${id} authored outside the adapter namespace (${author})`);
     }
     if (r.insertedAddr) insertAddrs.add(r.insertedAddr);
   }
@@ -87,7 +92,7 @@ function openForVerify(bytes: Uint8Array) {
   return { walk: walkBody(root), root };
 }
 
-function collectRevisionIds(root: any, ids: Set<string>): void {
+function collectRevisionAuthors(root: any, ids: Map<string, string>): void {
   const stack = [root];
   while (stack.length) {
     const cur = stack.pop()!;
@@ -95,12 +100,10 @@ function collectRevisionIds(root: any, ids: Set<string>): void {
       if (c.kind !== "el") continue;
       if (c.name === "w:ins" || c.name === "w:del" || c.name === "w:moveFrom" || c.name === "w:moveTo" || c.name.endsWith("PrChange")) {
         const id = c.attrs.find((a: any) => a.name === "w:id");
-        if (id) ids.add(decodeId(id.raw));
+        const author = c.attrs.find((a: any) => a.name === "w:author");
+        if (id) ids.set(decodeEntities(id.raw), author ? decodeEntities(author.raw) : "");
       }
       stack.push(c);
     }
   }
 }
-
-import { decodeEntities } from "@stitchdocx/package-io";
-const decodeId = (s: string) => decodeEntities(s);

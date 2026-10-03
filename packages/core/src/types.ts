@@ -12,16 +12,26 @@ export interface Paragraph {
   style?: string;
   editable: boolean;
   readOnlyReason?: string;
-  /** extra engine facts the app layer uses (superset of the CLI contract) */
-  container?: "cell" | "body";
-  numbered?: boolean;
-  inContentControl?: boolean;
+}
+
+/** engine-level decision: by changeIds or by author (research/04 §3) */
+export type RevisionDecision =
+  | { changeIds: string[]; decision: "accept" | "reject" }
+  | { author: string; decision: "accept" | "reject" };
+
+/** wire-level decision (handoff API.md finalize contract) */
+export interface Decision {
+  flagId: string;
+  author: string;
+  decision: "accept" | "reject";
+  /** accept-with-member-wording (adapter-level finalize composition) */
+  text?: string;
 }
 
 export type Op =
   | {
       op: "replace";
-      flagId?: string;
+      flagId: string;
       author: string;
       addr: Addr;
       start: number;
@@ -32,7 +42,7 @@ export type Op =
     }
   | {
       op: "delete";
-      flagId?: string;
+      flagId: string;
       author: string;
       addr: Addr;
       start: number;
@@ -41,7 +51,7 @@ export type Op =
     }
   | {
       op: "insertParagraphAfter";
-      flagId?: string;
+      flagId: string;
       author: string;
       addr: Addr;
       text: string;
@@ -62,7 +72,7 @@ export type RefusalReason =
 
 export interface Receipt {
   index: number;
-  flagId?: string;
+  flagId: string;
   status: "applied" | "refused";
   reason?: RefusalReason;
   addr: Addr;
@@ -74,12 +84,4 @@ export interface Receipt {
   after?: string;
   /** insertParagraphAfter only */
   insertedAddr?: Addr;
-}
-
-export interface Decision {
-  flagId?: string;
-  author: string;
-  decision: "accept" | "reject";
-  /** accept-with-member-wording (adapter-level finalize composition) */
-  text?: string;
 }

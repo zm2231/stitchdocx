@@ -147,26 +147,43 @@ export function makeRun(rPr: XElement | null, content: XNode[]): XElement {
 // —————————————————————————————————————————————————————— accept / reject
 
 /**
- * Resolve matched revisions in place. w:ins: accept unwraps (a paragraph-mark
- * ins is simply removed), reject removes. w:del: accept removes, reject
- * unwraps and restores w:delText to w:t. Moves and property changes are left
- * alone (the engine never authors them).
+ * Resolve matched revisions in place, across every revision kind the engine
+ * recognizes. w:ins/w:moveTo (insertions): accept unwraps (a paragraph-mark
+ * ins is simply removed), reject removes. w:del/w:moveFrom (deletions):
+ * accept removes, reject unwraps and restores the original text. Property
+ * changes: accept removes the marker (current props stay), reject restores
+ * the saved props carried inside the marker.
  */
 export function resolveRevisions(root: XElement, match: (rev: XElement) => boolean, decision: "accept" | "reject"): number {
-  const targets = [...revisionElements(root)].filter((r) => (r.name === "w:ins" || r.name === "w:del") && match(r));
+  const targets = [...revisionElements(root)].filter((r) => match(r));
   let n = 0;
   for (const t of targets) {
-    if (t.name === "w:ins") {
+    if (t.name === "w:ins" || t.name === "w:moveTo") {
       if (decision === "accept") {
         const parent = t.parent;
         if (parent && parent.name === "w:rPr") removeChild(t); // paragraph mark
         else unwrap(t);
       } else removeChild(t);
-    } else if (t.name === "w:del") {
+    } else if (t.name === "w:del" || t.name === "w:moveFrom") {
       if (decision === "accept") removeChild(t);
       else {
         for (const d of descendants(t)) if (d.name === "w:delText") renameEl(d, "w:t");
         unwrap(t);
+      }
+    } else if (t.name.endsWith("PrChange")) {
+      const parent = t.parent;
+      if (!parent) continue;
+      if (decision === "accept") {
+        removeChild(t);
+      } else {
+        // restore the saved props: the marker's element child holds the old props
+        const saved = t.children.find((c) => c.kind === "el");
+        const i = parent.children.indexOf(t);
+        if (i >= 0) parent.children.splice(i, 1);
+        if (saved) {
+          parent.children.splice(i, 0, ...saved.children);
+          for (const c of parent.children) if (c.kind === "el") c.parent = parent;
+        }
       }
     }
     n++;

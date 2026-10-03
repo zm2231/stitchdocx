@@ -56,7 +56,7 @@ function saxesRoundTrip(xml: string): string {
 
 describe("D1 parser spike", () => {
   it("hand-written parser: serialize(parse(x)) === x for every XML part of every fixture", () => {
-    expect(fixtures.length).toBeGreaterThan(15);
+    expect(fixtures.length).toBeGreaterThan(20);
     let parts = 0;
     let bytes = 0;
     const bad: string[] = [];
@@ -75,6 +75,8 @@ describe("D1 parser spike", () => {
       }
     }
     console.log(`fidelity: ${parts - bad.length}/${parts} parts byte-identical (${(bytes / 1024).toFixed(0)} KiB)`);
+    // pinned denominator: a regression in fixture discovery or part selection must fail loudly
+    expect(parts).toBe(400);
     expect(bad).toEqual([]);
   });
 

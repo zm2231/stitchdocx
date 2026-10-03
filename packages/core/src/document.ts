@@ -22,7 +22,9 @@ import { acceptAll, paragraphText, projectParagraphs, REVISION_NAMES, type Proje
 import { executeApply, type ApplyDeps } from "./ops.js";
 import { ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
-import type { Addr, Decision, Op, Paragraph, Receipt } from "./types.js";
+import type { Addr, Decision, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
+
+const OUR_AUTHOR_PREFIX = "Scope Optimizer";
 
 /** the parsed document root is an XDoc; kid() works on it identically */
 const treeAsEl = (d: unknown) => d as XElement;
@@ -77,13 +79,10 @@ export class Document {
       addr: p.addr ?? "",
       text: p.text,
       kind,
-      container: p.container,
-      inContentControl: p.inContentControl,
-      style: p.style ?? undefined,
-      numbered: p.numbered,
       editable: true,
     };
     if (p.table) out.table = p.table;
+    if (p.style) out.style = p.style;
     if (p.numbered) out.numbering = this.numberingLabel(p);
     return out;
   }
@@ -123,19 +122,31 @@ export class Document {
     return null;
   }
 
-  /** pure accept/reject of revisions by author (engine primitive) */
-  decide(decisions: Decision[]): number {
-    let n = 0;
-    for (const d of decisions) {
-      if (d.text !== undefined) continue; // accept-with-wording is the adapter's composition
-      if (d.decision !== "accept" && d.decision !== "reject") continue;
-      n += resolveRevisions(this.root, (rev) => getAttr(rev, "w:author") === d.author, d.decision);
-    }
-    if (n > 0) this.markDirty();
-    return n;
+  /**
+   * Pure accept/reject of revisions, by changeIds or by author
+   * (research/04 §3). Returns one receipt per decision with the change ids it
+   * resolved. The model must be saved by the caller.
+   */
+  decide(decisions: RevisionDecision[]): Receipt[] {
+    return decisions.map((d, index): Receipt => {
+      const matched = [...allRevisions(this.root)].filter((rev) => {
+        if ("changeIds" in d) {
+          const id = getAttr(rev, "w:id");
+          return id !== null && d.changeIds.includes(id);
+        }
+        return getAttr(rev, "w:author") === d.author;
+      });
+      const ids = matched.map((rev) => getAttr(rev, "w:id") ?? "").filter((s) => s !== "");
+      const resolved = resolveRevisions(this.root, (rev) => matched.includes(rev), d.decision);
+      if (resolved > 0) this.markDirty();
+      return { index, status: "applied", addr: "", flagId: "", changeIds: ids };
+    });
   }
 
-  /** reject/accept every revision whose author starts with `prefix` */
+  /**
+   * Reject/accept every revision whose author starts with `prefix`, across all
+   * revision kinds (ins/del/moves/property changes).
+   */
   decideByPrefix(prefix: string, decision: "accept" | "reject"): number {
     const authors = new Set<string>();
     for (const rev of allRevisions(this.root)) {
@@ -195,6 +206,24 @@ export class Document {
           const mark = kids(rPrEl).find((c) => REVISION_NAMES.has(c.name));
           if (mark) removeChildEl(rPrEl, mark);
         }
+        touched++;
+        continue;
+      }
+      // insertion-only edits (empty-span replace): the member wording takes the
+      // insertion's place — no deletion to restore
+      if (rec.dels.length === 0 && rec.ins.length > 0) {
+        const anchored = rec.ins.find((ins) => para.children.includes(ins)) ?? rec.ins[0]!;
+        const rPr = cloneFirstRunPrFrom(anchored);
+        let insertAt = para.children.indexOf(anchored);
+        if (insertAt < 0) insertAt = para.children.length;
+        for (const ins of rec.ins) {
+          const i = para.children.indexOf(ins);
+          if (i >= 0) para.children.splice(i, 1);
+          else if (ins.parent) removeChildEl(ins.parent, ins);
+        }
+        const run = makeRun(rPr, textToRunChildren(decision.text!));
+        para.children.splice(Math.min(insertAt, para.children.length), 0, run);
+        run.parent = para;
         touched++;
         continue;
       }
@@ -268,7 +297,7 @@ function* allRevisions(root: XElement): Generator<XElement> {
     const cur = stack.pop()!;
     for (const c of cur.children) {
       if (c.kind !== "el") continue;
-      if (REVISION_NAMES.has(c.name)) yield c;
+      if (REVISION_NAMES.has(c.name) || c.name.endsWith("PrChange")) yield c;
       stack.push(c);
     }
   }

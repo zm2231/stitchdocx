@@ -21,12 +21,21 @@ export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: 
   if (!root) throw new Error("word/document.xml has no w:document root");
   const walk = walkBody(root);
 
-  // paraIds: unique, deterministic, < 0x80000000
+  // paraIds: unique, deterministic, < 0x80000000. Duplicates are repaired:
+  // the first occurrence keeps the id, later ones get fresh ids (document order).
   const alloc = new ParaIdAllocator(walk.paragraphs);
   let assigned = 0;
+  const seen = new Set<string>();
+  const reassign: XElement[] = [];
   for (const p of walk.paragraphs) {
     const id = getAttr(p, "w14:paraId");
-    if (id !== null) continue;
+    if (id === null) continue;
+    const key = id.toUpperCase();
+    if (seen.has(key)) reassign.push(p);
+    else seen.add(key);
+  }
+  for (const p of walk.paragraphs) {
+    if (getAttr(p, "w14:paraId") !== null && !reassign.includes(p)) continue;
     setAttr(p, "w14:paraId", alloc.take());
     assigned++;
   }
