@@ -38,9 +38,12 @@ export function writePackage(entries: Entries): Uint8Array {
     const deflated = content.length > 0 ? deflateSync(content, { level: 6 }) : content;
     const method = content.length > 0 ? 8 : 0;
     const crc = crc32(content);
-    const local = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(method), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(deflated.length), ...u32(content.length), ...u16(nameBytes.length), ...u16(0), ...nameBytes];
+    // general-purpose bit 11 marks UTF-8 names; without it readers decode
+    // high bytes as cp437 and a retained part effectively gets renamed
+    const flags = nameBytes.some((b) => b > 0x7f) ? 0x0800 : 0;
+    const local = [...u32(0x04034b50), ...u16(20), ...u16(flags), ...u16(method), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(deflated.length), ...u32(content.length), ...u16(nameBytes.length), ...u16(0), ...nameBytes];
     chunks.push(new Uint8Array(local), deflated);
-    const cd = [...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(method), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(deflated.length), ...u32(content.length), ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...nameBytes];
+    const cd = [...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(flags), ...u16(method), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(deflated.length), ...u32(content.length), ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...nameBytes];
     central.push(new Uint8Array(cd));
     offset += local.length + deflated.length;
   }

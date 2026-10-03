@@ -111,6 +111,16 @@ describe("M1 lossless package round-trip", () => {
     expect([...out.keys()]).toEqual(["10", "2", "word/"]);
   });
 
+  it("UTF-8 entry names round-trip exactly (P6)", () => {
+    const entries = new Map<string, Uint8Array>([
+      ["word/é.xml", encodePart("café")],
+      ["word/ok.xml", encodePart("plain")],
+    ]);
+    const out = readPackage(writePackage(entries));
+    expect([...out.keys()]).toEqual(["word/é.xml", "word/ok.xml"]);
+    expect(new TextDecoder().decode(out.get("word/é.xml")!)).toBe("café");
+  });
+
   it("writePackage is byte-deterministic across independent invocations (P4)", () => {
     for (const docx of fixtures.slice(0, 5)) {
       const entries = readPackage(readFileSync(docx));
