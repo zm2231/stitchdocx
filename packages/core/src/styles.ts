@@ -3,7 +3,8 @@
 // XOR, each taking its nearest definition along basedOn; docDefaults apply
 // only when neither chain defines it; an absent or unknown pStyle means the
 // default paragraph style. specVanish and webHidden runs print in Word.
-import { el, kid, kids, parseXml, type XElement } from "@stitchdocx/package-io";
+import { el, kid, kids, type XElement } from "@stitchdocx/package-io";
+import { parsePart } from "./limits.js";
 import { attrVal } from "./projection.js";
 import { cloneRunPr } from "./revisions.js";
 
@@ -31,7 +32,7 @@ export class StyleSheet {
 
   static parse(stylesXml: string | undefined): StyleSheet {
     if (!stylesXml) return StyleSheet.empty;
-    const root = kid(parseXml(stylesXml) as unknown as XElement, "w:styles");
+    const root = kid(parsePart(stylesXml) as unknown as XElement, "w:styles");
     if (!root) return StyleSheet.empty;
     const paragraph = new Map<string, StyleDef>();
     const character = new Map<string, StyleDef>();

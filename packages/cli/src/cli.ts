@@ -9,7 +9,7 @@
 // calls it `ref` (a neutral caller id echoed on receipts). This adapter maps
 // between the two and is the only place the wire name exists.
 import { readFileSync, writeFileSync } from "node:fs";
-import { finalizeDocx, isIsoDate, normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision } from "@stitchdocx/core";
+import { finalizeDocx, isIsoDate, normalizeDocx, openDocument, PackageLimitError, verifyOutput, type Op, type Receipt, type Decision } from "@stitchdocx/core";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -110,5 +110,8 @@ try {
       fail(`unknown command ${String(cmd)}; expected normalize|paragraphs|apply|finalize|verify`);
   }
 } catch (err) {
-  fail(err instanceof Error ? err.message : String(err));
+  // a package the engine will not open is a refusal of the whole input, not
+  // an engine failure: the caller routes the document elsewhere
+  if (err instanceof PackageLimitError) out({ refused: { reason: err.code, detail: err.message } });
+  else fail(err instanceof Error ? err.message : String(err));
 }

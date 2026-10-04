@@ -4,7 +4,9 @@
 // from a paragraph style chain, and %n in w:lvlText reads level n-1. A fresh
 // counter set is created for every projection pass — labels never depend on
 // earlier calls.
-import { decodeAttrValue, kid, kids, parseXml, type XElement } from "@stitchdocx/package-io";
+import { decodeAttrValue, kid, kids, type XElement } from "@stitchdocx/package-io";
+import { parsePart } from "./limits.js";
+import type { NumPrRef } from "./projection.js";
 
 interface LevelDef {
   fmt: string;
@@ -29,6 +31,12 @@ const attrOf = (el: XElement, name: string): string | null => {
   return a ? decodeAttrValue(a.raw) : null;
 };
 
+/** what numbering reads from a paragraph: its style and its own numPr */
+export interface NumberedParagraph {
+  style: string | null;
+  numPr: NumPrRef | null;
+}
+
 export class NumberingModel {
   constructor(
     private abstracts: Map<string, Map<number, LevelDef>>,
@@ -36,20 +44,17 @@ export class NumberingModel {
     private styles: Map<string, StyleDef>,
   ) {}
 
-  /** the numbering reference a paragraph renders, via pPr or its style chain */
-  private numPrOf(p: XElement): { numId: string; ilvl: string } | null {
-    const pPr = kid(p, "w:pPr");
-    const numPr = pPr ? kid(pPr, "w:numPr") : undefined;
-    if (numPr) {
-      const numId = attrOf(kid(numPr, "w:numId") ?? (el0 as XElement), "w:val");
+  /** the numbering reference a paragraph renders, via its own numPr or its
+   *  style chain */
+  private numPrOf(p: NumberedParagraph): { numId: string; ilvl: string } | null {
+    if (p.numPr) {
+      const numId = p.numPr.numId;
       if (numId === null) return null;
       if (numId === "0") return null;
-      const ilvl = attrOf(kid(numPr, "w:ilvl") ?? (el0 as XElement), "w:val") ?? "0";
-      return { numId, ilvl };
+      return { numId, ilvl: p.numPr.ilvl ?? "0" };
     }
     // inherited from a paragraph style (walking the basedOn chain)
-    const pStyle = pPr ? kid(pPr, "w:pStyle") : undefined;
-    const styleId = pStyle ? attrOf(pStyle, "w:val") : null;
+    const styleId = p.style;
     if (styleId === null) return null;
     const seen = new Set<string>();
     let cur: string | undefined = styleId;
@@ -67,7 +72,7 @@ export class NumberingModel {
   }
 
   /** true when the paragraph renders a numbering label (numbering from pPr or style) */
-  numberedFor(p: XElement): boolean {
+  numberedFor(p: NumberedParagraph): boolean {
     return this.numPrOf(p) !== null;
   }
 
@@ -75,7 +80,7 @@ export class NumberingModel {
    * The label for `p`, advancing the counters in `counters` (one entry per
    * numId; fresh per projection pass).
    */
-  labelFor(p: XElement, counters: Map<string, (number | undefined)[]>): string | undefined {
+  labelFor(p: NumberedParagraph, counters: Map<string, (number | undefined)[]>): string | undefined {
     const ref = this.numPrOf(p);
     if (!ref) return undefined;
     const num = this.nums.get(ref.numId);
@@ -176,7 +181,7 @@ export function parseNumberingModel(numberingXml: string | undefined, stylesXml:
   const nums = new Map<string, NumDef>();
   const styles = new Map<string, StyleDef>();
   if (numberingXml) {
-    const tree = parseXml(numberingXml);
+    const tree = parsePart(numberingXml);
     const root = kid(tree as unknown as XElement, "w:numbering");
     if (root) {
       for (const a of kids(root, "w:abstractNum")) {
@@ -209,7 +214,7 @@ export function parseNumberingModel(numberingXml: string | undefined, stylesXml:
     }
   }
   if (stylesXml) {
-    const tree = parseXml(stylesXml);
+    const tree = parsePart(stylesXml);
     const root = kid(tree as unknown as XElement, "w:styles");
     if (root) {
       for (const s of kids(root, "w:style")) {

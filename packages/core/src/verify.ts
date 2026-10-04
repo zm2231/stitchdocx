@@ -4,11 +4,34 @@
 // every other package entry is byte-identical and none is added or removed,
 // and the main part outside paragraphs is canonically identical. Tampering
 // anywhere fails.
-import { cloneNode, decodePart, decodeEntities, kid, kids, mainPartName, openPackage, parseXml, relatedPart, serializeXml, removeAttr, setAttr, textNode, type XElement } from "@stitchdocx/package-io";
-import { walkBody } from "./body.js";
+import {
+  cloneNode,
+  decodePart,
+  decodeEntities,
+  entryBytes,
+  isPending,
+  kid,
+  kids,
+  mainPartName,
+  openPackage,
+  pendingSource,
+  RawEntry,
+  readView,
+  relatedPart,
+  removeAttr,
+  scanStartTags,
+  serializeXml,
+  setAttr,
+  textNode,
+  type EntryData,
+  type PackageReader,
+  type XElement,
+} from "@stitchdocx/package-io";
+import { parseMainPart, walkBody } from "./body.js";
 import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, wordText, type View } from "./projection.js";
-import { isRevisionEl } from "./revisions.js";
+import { isRevisionEl, mayHoldRevisionId } from "./revisions.js";
 import { StyleSheet } from "./styles.js";
+import { mainPartSource } from "./limits.js";
 import type { Addr, Receipt } from "./types.js";
 
 export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts: Receipt[]): { ok: boolean; failures: string[] } {
@@ -16,7 +39,9 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
   const applied = receipts.filter((r) => r.status === "applied");
 
   // — package accounting: same entries, same order, everything but the main
-  // part byte-identical
+  // part byte-identical. Entries stored identically (same method, CRC, sizes
+  // and compressed bytes) are equal without inflating; any other pair is
+  // inflated and compared.
   const origPkg = openPackage(original);
   const outPkg = openPackage(output);
   if (origPkg.names.join("\u0000") !== outPkg.names.join("\u0000")) {
@@ -25,19 +50,18 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     const mainPart = mainPartName(origPkg);
     for (const name of origPkg.names) {
       if (name === mainPart) continue;
-      const a = origPkg.part(name)!;
-      const b = outPkg.part(name)!;
-      if (!bytesEqual(a, b)) failures.push(`package entry ${name} was modified`);
+      if (!entriesEqual(origPkg.raw(name)!, outPkg.raw(name)!)) failures.push(`package entry ${name} was modified`);
     }
   }
 
-  const origDoc = openForVerify(original);
-  const outDoc = openForVerify(output);
+  const origDoc = openForVerify(origPkg);
+  const outDoc = openForVerify(outPkg);
 
-  // — main part outside paragraphs: canonically identical (paragraphs are
-  // removed wholesale from both trees; everything that remains — body
-  // properties, section breaks, tables' shells, text-box anchors — must match)
-  if (stripParagraphs(origDoc.root) !== stripParagraphs(outDoc.root)) {
+  // — main part outside paragraphs: identical (paragraphs are left out of
+  // both; everything that remains — body properties, section breaks, tables'
+  // shells — must match)
+  const withoutParagraphs = { omit: (e: XElement) => e.name === "w:p" };
+  if (serializeXml(origDoc.root, withoutParagraphs) !== serializeXml(outDoc.root, withoutParagraphs)) {
     failures.push("document content outside paragraphs was modified");
   }
 
@@ -50,8 +74,7 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
   const origAddrs = origRecords.map((r) => r.addr ?? "");
 
   // existing revision ids → authors in the output (for receipt identity checks)
-  const outRevAuthors = new Map<string, string>();
-  collectRevisionAuthors(outDoc.root, outRevAuthors);
+  const outRevAuthors = revisionAuthors(outDoc.source);
 
   const insertAddrs = new Set<string>();
   for (const r of applied) {
@@ -68,7 +91,7 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     const ids = new Set((r.changeIds ?? []).map(String));
     const rejectMine: View = (rev) => (rev.id !== null && ids.has(rev.id) ? "reject" : "accept");
     if (r.insertedAddr) {
-      const rejRecords = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles);
+      const rejRecords = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles, new Set([r.insertedAddr, r.addr]));
       const rejByAddr = new Map<string, (typeof rejRecords)[number]>();
       for (const rec of rejRecords) if (rec.addr) rejByAddr.set(rec.addr, rec);
       const rejected = rejByAddr.get(r.insertedAddr);
@@ -98,7 +121,7 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     }
     // receipts report in projection-record space: a removed mark may merge
     // other paragraphs' content into this record under either view
-    const rejectedRecord = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles).find((rec) => rec.addr === r.addr);
+    const rejectedRecord = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles, new Set([r.addr]))[0];
     const rejectedText = rejectedRecord ? rejectedRecord.text : paragraphText(target.node, rejectMine, outDoc.styles);
     if (rejectedText !== r.before) failures.push(`receipt ${r.index}: reject yields ${JSON.stringify(rejectedText)}, expected before ${JSON.stringify(r.before ?? "")}`);
     if (target.text !== r.after) failures.push(`receipt ${r.index}: accept yields ${JSON.stringify(target.text)}, expected after ${JSON.stringify(r.after ?? "")}`);
@@ -144,7 +167,7 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     const extra = clone.children.filter((c) => c.kind === "el" && c.name !== "w:pPr");
     if (extra.length > 0) failures.push(`receipt ${r.index}: inserted paragraph ${r.insertedAddr} holds content outside its revisions (${extra.map((c) => (c as XElement).name).join(", ")})`);
   }
-  for (const rev of walkEls(outDoc.root)) {
+  for (const rev of elementsHolding(outDoc.root, [...allOurs])) {
     if ((rev.name !== "w:ins" && rev.name !== "w:moveTo") || !allOurs.has(attrVal(rev, "w:id") ?? "")) continue;
     const para = enclosingParagraph(rev);
     const hidden = (r: XElement) =>
@@ -190,27 +213,31 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-/** serialize the document with every w:p element removed (a fresh clone; the
- *  caller's tree is untouched) */
-function stripParagraphs(root: XElement): string {
-  const clone = cloneNode(root) as XElement;
-  const doomed: XElement[] = [];
-  const walk = (node: XElement): void => {
-    for (const c of node.children) {
-      if (c.kind !== "el") continue;
-      if (c.name === "w:p") doomed.push(c);
-      else walk(c);
+function entriesEqual(a: EntryData, b: EntryData): boolean {
+  if (a instanceof RawEntry && b instanceof RawEntry && a.method === b.method && a.crc === b.crc && a.size === b.size && bytesEqual(a.compressed, b.compressed)) return true;
+  return bytesEqual(entryBytes(a), entryBytes(b));
+}
+
+/** every element under `root`, reading an unparsed paragraph (through a
+ *  transient view) only when its source names one of `ids` */
+function elementsHolding(root: XElement, ids: string[]): Generator<XElement> {
+  return walkHolding(root, mayHoldRevisionId(ids));
+}
+
+function* walkHolding(root: XElement, holds: (source: string) => boolean): Generator<XElement> {
+  for (const c of root.children) {
+    if (c.kind !== "el") continue;
+    if (isPending(c)) {
+      const source = pendingSource(c)!;
+      if (!holds(source)) continue;
+      const view = readView(c);
+      yield view;
+      yield* walkHolding(view, holds);
+      continue;
     }
-  };
-  walk(clone);
-  for (const p of doomed) {
-    const parent = p.parent;
-    if (parent) {
-      const i = parent.children.indexOf(p);
-      if (i >= 0) parent.children.splice(i, 1);
-    }
+    yield c;
+    yield* walkHolding(c, holds);
   }
-  return serializeXml(clone);
 }
 
 /**
@@ -379,29 +406,22 @@ function enclosingParagraph(node: XElement): XElement | null {
   return cur;
 }
 
-function openForVerify(bytes: Uint8Array) {
-  const reader = openPackage(bytes);
-  const docXml = reader.part(mainPartName(reader));
-  if (!docXml) throw new Error("main document part missing");
-  const tree = parseXml(decodePart(docXml));
-  const root = kid(tree as any, "w:document");
-  if (!root) throw new Error("word/document.xml has no w:document root");
-  const stylesPart = reader.part(relatedPart(reader, mainPartName(reader), "styles") ?? "word/styles.xml");
-  return { walk: walkBody(root), root, styles: StyleSheet.parse(stylesPart ? decodePart(stylesPart) : undefined) };
+function openForVerify(reader: PackageReader) {
+  const mainPart = mainPartName(reader);
+  const source = mainPartSource(reader, mainPart);
+  const { root } = parseMainPart(source);
+  const stylesPart = reader.part(relatedPart(reader, mainPart, "styles") ?? "word/styles.xml");
+  return { walk: walkBody(root), root, source, styles: StyleSheet.parse(stylesPart ? decodePart(stylesPart) : undefined) };
 }
 
-function collectRevisionAuthors(root: any, ids: Map<string, string>): void {
-  const stack = [root];
-  while (stack.length) {
-    const cur = stack.pop()!;
-    for (const c of cur.children) {
-      if (c.kind !== "el") continue;
-      if (c.name === "w:ins" || c.name === "w:del" || c.name === "w:moveFrom" || c.name === "w:moveTo" || c.name.endsWith("PrChange")) {
-        const id = c.attrs.find((a: any) => a.name === "w:id");
-        const author = c.attrs.find((a: any) => a.name === "w:author");
-        if (id) ids.set(decodeEntities(id.raw), author ? decodeEntities(author.raw) : "");
-      }
-      stack.push(c);
-    }
-  }
+/** revision id → author for every revision-type element in the main part */
+function revisionAuthors(source: string): Map<string, string> {
+  const ids = new Map<string, string>();
+  const isRevision = (name: string) => name === "w:ins" || name === "w:del" || name === "w:moveFrom" || name === "w:moveTo" || name.endsWith("PrChange");
+  scanStartTags(source, isRevision, (_, attrs) => {
+    const id = attrs.find((a) => a.name === "w:id");
+    const author = attrs.find((a) => a.name === "w:author");
+    if (id) ids.set(decodeEntities(id.raw), author ? decodeEntities(author.raw) : "");
+  });
+  return ids;
 }

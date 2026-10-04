@@ -22,7 +22,8 @@ export class PackageLimitError extends Error {
       | "too_many_entries"
       | "duplicate_entry"
       | "encrypted_entry"
-      | "unreadable_archive",
+      | "unreadable_archive"
+      | "document_too_large",
     msg: string,
   ) {
     super(msg);
@@ -37,6 +38,9 @@ export const PACKAGE_LIMITS = {
   maxEntryUncompressed: 64 * 1024 * 1024,
   /** entry count */
   maxEntries: 4096,
+  /** nodes one parse may build (see NodeBudget): an XML tree costs far more
+   *  per node than per byte, so bytes alone do not bound it */
+  maxPartNodes: 60_000,
 };
 
 /** an entry kept in its original compressed form; entryBytes() inflates it */
@@ -136,6 +140,14 @@ export class PackageReader {
   /** inflated bytes of one part, inflating on demand */
   part(name: string): Uint8Array | undefined {
     if (this.eager) return this.eager.get(name);
+    const raw = this.raw(name);
+    return raw ? entryBytes(raw) : undefined;
+  }
+
+  /** one entry as stored: its compressed bytes, method, CRC and size, with
+   *  nothing inflated (an archive read eagerly hands back inflated bytes) */
+  raw(name: string): EntryData | undefined {
+    if (this.eager) return this.eager.get(name);
     const e = this.central.get(name);
     if (!e) return undefined;
     const local = e.localOffset;
@@ -146,8 +158,13 @@ export class PackageReader {
     const nameLen = view.getUint16(local + 26, true);
     const extraLen = view.getUint16(local + 28, true);
     const start = local + 30 + nameLen + extraLen;
-    const compressed = this.data.subarray(start, start + e.compressedSize);
-    return entryBytes(new RawEntry(compressed, e.method, e.crc, e.size));
+    return new RawEntry(this.data.subarray(start, start + e.compressedSize), e.method, e.crc, e.size);
+  }
+
+  /** uncompressed size of an entry as the archive records it */
+  size(name: string): number | undefined {
+    if (this.eager) return this.eager.get(name)?.length;
+    return this.central.get(name)?.size;
   }
 
   /** part() under the registry's Parts interface */
@@ -162,19 +179,7 @@ export class PackageReader {
    */
   readAll(only?: (name: string) => boolean): Entries {
     const entries: Entries = new Map();
-    for (const name of this.names) {
-      if (!only || only(name)) entries.set(name, this.part(name)!);
-      else if (this.eager) entries.set(name, this.eager.get(name)!);
-      else {
-        const e = this.central.get(name)!;
-        const local = e.localOffset;
-        const view = new DataView(this.data.buffer, this.data.byteOffset, this.data.byteLength);
-        const nameLen = view.getUint16(local + 26, true);
-        const extraLen = view.getUint16(local + 28, true);
-        const start = local + 30 + nameLen + extraLen;
-        entries.set(name, new RawEntry(this.data.subarray(start, start + e.compressedSize), e.method, e.crc, e.size));
-      }
-    }
+    for (const name of this.names) entries.set(name, !only || only(name) ? this.part(name)! : this.raw(name)!);
     return entries;
   }
 }

@@ -6,6 +6,7 @@ import {
   el,
   encodeText,
   getAttr,
+  isPending,
   kid,
   kids,
   removeChild,
@@ -36,15 +37,14 @@ export function isRevisionEl(e: XElement): boolean {
   return REVISION_ALL.includes(e.name);
 }
 
-export function* revisionElements(root: XElement): Generator<XElement> {
-  for (const e of walkAll(root)) if (isRevisionEl(e)) yield e;
-}
-
-/** revision elements in document order (walkAll's stack walk is reversed) */
+/** revision elements in document order (walkAll's stack walk is reversed).
+ *  Lazy paragraphs still unparsed are skipped: a caller resolving revisions
+ *  parses the paragraphs that hold them first. */
 function revisionElementsInOrder(root: XElement): XElement[] {
   const out: XElement[] = [];
   const visit = (node: XElement): void => {
     if (isRevisionEl(node)) out.push(node);
+    if (isPending(node)) return;
     for (const c of node.children) if (c.kind === "el") visit(c);
   };
   visit(root);
@@ -60,21 +60,21 @@ export function* walkAll(root: XElement): Generator<XElement> {
   }
 }
 
-/** monotonic w:id allocator, seeded above every existing revision id on every
- *  revision-type element across every part root given */
+/** a test for source that may hold a w:id equal to one of `ids`: the exact
+ *  value with any spacing around "=", or any entity-encoded value */
+export function mayHoldRevisionId(ids: Iterable<string>): (source: string) => boolean {
+  const alts = [...ids].map((id) => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (alts.length === 0) return () => false;
+  const re = new RegExp(`\\bw:id\\s*=\\s*(["'])(?:${alts.join("|")}|[^"'&]*&[^"']*)\\1`);
+  return (source) => re.test(source);
+}
+
+/** monotonic w:id allocator, seeded above the largest revision id the
+ *  document uses in any part */
 export class RevisionIdAllocator {
   private next: number;
-  constructor(roots: Iterable<XElement>) {
-    let max = 0;
-    for (const root of roots) {
-      for (const r of walkAll(root)) {
-        if (!REVISION_ID_NAMES.has(r.name)) continue;
-        const id = getAttr(r, "w:id");
-        const n = id === null ? NaN : Number(id);
-        if (Number.isInteger(n) && n > max) max = n;
-      }
-    }
-    this.next = max + 1;
+  constructor(maxUsed: number) {
+    this.next = maxUsed + 1;
   }
   take(): string {
     return String(this.next++);
@@ -382,15 +382,6 @@ function* descendants(root: XElement): Generator<XElement> {
       yield* descendants(c);
     }
   }
-}
-
-/** every revision authored by `author` (exact match) */
-export function revisionsByAuthor(root: XElement, author: string): XElement[] {
-  return [...revisionElements(root)].filter((r) => getAttr(r, "w:author") === author);
-}
-
-export function revisionIdsOf(els: XElement[]): string[] {
-  return els.map((e) => getAttr(e, "w:id") ?? "").filter((s) => s !== "");
 }
 
 export const attrOf = getAttr;

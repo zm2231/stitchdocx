@@ -7,9 +7,13 @@ import {
   el,
   encodePart,
   getAttr,
+  isPending,
   kid,
   kids,
   mainPartName,
+  materialize,
+  pendingElements,
+  pendingSource,
   openPackage,
   relatedPart,
   setAttr,
@@ -20,15 +24,16 @@ import {
   type Entries,
   type XElement,
 } from "@stitchdocx/package-io";
-import { walkBody, type BodyWalk } from "./body.js";
+import { parseMainPart, walkBody, type BodyWalk } from "./body.js";
 import { acceptAll, attrVal, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
 import { buildSpanMap } from "./spanmap.js";
 import { executeApply, splitAt, type ApplyDeps } from "./ops.js";
-import { ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
+import { mayHoldRevisionId, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
 import { StyleSheet } from "./styles.js";
 import { NumberingModel, parseNumberingModel } from "./numbering.js";
-import { otherPartRoots, paraIdsAcrossParts } from "./parts.js";
+import { maxRevisionIdAcrossParts, paraIdsAcrossParts } from "./parts.js";
+import { mainPartSource } from "./limits.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt } from "./types.js";
 
 /** the parsed document root is an XDoc; kid() works on it identically */
@@ -60,11 +65,10 @@ export class Document {
     this.originalBytes = bytes;
     this.reader = openPackage(bytes);
     this.mainPart = mainPartName(this.reader);
-    const docXml = this.reader.part(this.mainPart);
-    if (!docXml) throw new Error(`${this.mainPart} missing`);
-    this.tree = parseXml(decodePart(docXml));
-    this.root = kid(treeAsEl(this.tree), "w:document")!;
-    if (!this.root) throw new Error("word/document.xml has no w:document root");
+    // paragraphs stay source until an edit reaches them; read-only passes
+    // parse each one transiently, and save copies the untouched ones verbatim
+    const source = mainPartSource(this.reader, this.mainPart);
+    ({ tree: this.tree, root: this.root } = parseMainPart(source));
     this.walk = walkBody(this.root);
     this.styles = StyleSheet.parse(this.partText(relatedPart(this.reader, this.mainPart, "styles") ?? "word/styles.xml"));
     this.paraByAddr = new Map();
@@ -73,12 +77,11 @@ export class Document {
       if (addr !== null) this.paraByAddr.set(addr, p);
     }
     // revision ids are unique across every part; seed above the largest id on
-    // any revision-type element anywhere (the main part's tree is already parsed)
-    this.ids = new RevisionIdAllocator([this.root, ...otherPartRoots(this.reader, this.mainPart)]);
-    this.paraIds = new ParaIdAllocator(paraIdsAcrossParts(this.reader, this.mainPart, this.walk.paragraphs));
-    // only the main part comes inflated; everything else stays raw until the
-    // writer needs it or a command reads it
-    this.entries = this.reader.readAll((name) => name === this.mainPart);
+    // any revision-type element anywhere
+    this.ids = new RevisionIdAllocator(maxRevisionIdAcrossParts(this.reader, this.mainPart, source));
+    this.paraIds = new ParaIdAllocator(paraIdsAcrossParts(this.reader, this.mainPart, source));
+    // every entry stays compressed; save replaces the main part
+    this.entries = this.reader.readAll(() => false);
   }
 
   static open(bytes: Uint8Array): Document {
@@ -101,7 +104,7 @@ export class Document {
   }
 
   private toPublicParagraph(p: ProjectionParagraph, model: NumberingModel, counters: Map<string, (number | undefined)[]>): Paragraph {
-    const kind: Paragraph["kind"] = p.container === "cell" ? "cell" : model.numberedFor(p.node) ? "listItem" : /(^|[^a-z])heading|title/i.test(p.style ?? "") ? "heading" : "body";
+    const kind: Paragraph["kind"] = p.container === "cell" ? "cell" : model.numberedFor(p) ? "listItem" : /(^|[^a-z])heading|title/i.test(p.style ?? "") ? "heading" : "body";
     // a record whose text includes content carried across a removed mark (its
     // own or a preceding paragraph's) is a merged VIEW: its offsets span more
     // than the one paragraph an op may edit, so it is not addressable as listed
@@ -115,8 +118,8 @@ export class Document {
     };
     if (p.table) out.table = p.table;
     if (p.style) out.style = p.style;
-    if (model.numberedFor(p.node)) {
-      const label = model.labelFor(p.node, counters);
+    if (model.numberedFor(p)) {
+      const label = model.labelFor(p, counters);
       if (label !== undefined) out.numbering = label;
     }
     return out;
@@ -167,7 +170,15 @@ export class Document {
         return state ? [...state] : [];
       },
     };
-    const receipts = executeApply(deps, ops);
+    // refusals come back as receipts; anything thrown (a node budget spent
+    // mid-batch, say) may leave the tree partly edited
+    let receipts: Receipt[];
+    try {
+      receipts = executeApply(deps, ops);
+    } catch (e) {
+      this.broken = e instanceof Error ? e.message : String(e);
+      throw e;
+    }
     if (receipts.some((r) => r.status === "applied")) this.markDirty();
     // register paragraphs created by inserts so later calls can address them
     for (const r of receipts) if (r.insertedAddr) this.paraByAddr.set(r.insertedAddr, this.findByAddrIn(r.insertedAddr)!);
@@ -186,8 +197,7 @@ export class Document {
       }
       return this.recordTextCache.byAddr.get(addr) ?? null;
     }
-    for (const rec of projectParagraphs(this.walk, view, this.styles)) if (rec.addr === addr) return rec.text;
-    return null;
+    return projectParagraphs(this.walk, view, this.styles, new Set([addr]))[0]?.text ?? null;
   }
 
   private findByAddrIn(addr: Addr): XElement | null {
@@ -213,6 +223,9 @@ export class Document {
    */
   decide(decisions: Decision[]): DecisionResult[] {
     this.assertUsable();
+    // only paragraphs whose source names one of the ids are parsed
+    const holds = mayHoldRevisionId(decisions.flatMap((d) => d.changeIds));
+    for (const p of [...pendingElements(this.root)]) if (holds(pendingSource(p)!)) materialize(p);
     const byId = new Map<string, XElement[]>();
     for (const rev of allRevisions(this.root)) {
       const id = getAttr(rev, "w:id");
@@ -249,7 +262,7 @@ export class Document {
   private broken: string | null = null;
 
   private assertUsable(): void {
-    if (this.broken !== null) throw new Error(`document is unusable after a failed decide: ${this.broken}`);
+    if (this.broken !== null) throw new Error(`document is unusable after a failed edit: ${this.broken}`);
   }
 
   /**
@@ -405,10 +418,12 @@ function removeChildEl(parent: XElement, child: XElement): void {
   if (i >= 0) parent.children.splice(i, 1);
 }
 
+/** revision elements outside unparsed paragraphs */
 function* allRevisions(root: XElement): Generator<XElement> {
   const stack: XElement[] = [root];
   while (stack.length) {
     const cur = stack.pop()!;
+    if (isPending(cur)) continue;
     for (const c of cur.children) {
       if (c.kind !== "el") continue;
       if (REVISION_NAMES.has(c.name) || c.name.endsWith("PrChange")) yield c;

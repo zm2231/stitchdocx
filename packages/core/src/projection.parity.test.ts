@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { decodeAttrValue, decodePart, mainPartName, readPackage, parseXml, entryBytes } from "@stitchdocx/package-io";
 import { openDocument } from "./document.js";
-import type { View } from "./projection.js";
+import { normalizeDocx } from "./normalize.js";
+import { projectParagraphs, type View } from "./projection.js";
+import type { BodyWalk } from "./body.js";
 
 const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
@@ -93,4 +95,32 @@ d("M2 projection parity vs verification reader" + (ACCEPTANCE ? "" : " (skipped:
       }
     });
   }
+});
+
+d("M2 projection restricted to some records" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"), () => {
+  const fixtures = [...docxFiles(join(ACCEPTANCE, "fixtures"))];
+
+  it("reads every record exactly as the full projection does, under every view", () => {
+    for (const docx of fixtures) {
+      const bytes = normalizeDocx(new Uint8Array(readFileSync(docx))).docx;
+      const authors = revisionAuthors(bytes);
+      for (const v of VIEWS) {
+        const view: View = (r) => (authors.has(r.author ?? "") ? v.mine : v.reader);
+        const doc = openDocument(bytes);
+        const walk = (doc as unknown as { walk: BodyWalk }).walk;
+        const full = projectParagraphs(walk, view, doc.styles);
+        for (const rec of full) {
+          if (!rec.addr) continue;
+          const only = projectParagraphs(walk, view, doc.styles, new Set([rec.addr]));
+          const label = `${docx} [${v.name}] ${rec.addr}`;
+          expect(only.length, `${label} count`).toBe(1);
+          const { node, merged, ...rest } = only[0]!;
+          const { node: fullNode, merged: fullMerged, ...fullRest } = rec;
+          expect(rest, label).toEqual(fullRest);
+          expect(node, `${label} node`).toBe(fullNode);
+          expect(merged, `${label} merged`).toEqual(fullMerged);
+        }
+      }
+    }
+  });
 });

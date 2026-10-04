@@ -1,8 +1,8 @@
 // Light part registry: [Content_Types].xml and relationship parts. The gate
 // never adds or removes parts, so this exists to answer "what is this part"
 // questions and to keep door open for later phases (comments, headers).
-import { decodePart, entryBytes, type EntryData } from "./zip.js";
-import { decodeEntities, kid, kids, parseXml, serializeXml, type XElement, type XDoc } from "./xml.js";
+import { decodePart, entryBytes, PACKAGE_LIMITS, type EntryData } from "./zip.js";
+import { decodeEntities, kid, kids, NodeBudget, parseXml, serializeXml, type XElement, type XDoc } from "./xml.js";
 
 export interface ContentTypes {
   defaults: Map<string, string>; // extension -> content type
@@ -10,7 +10,7 @@ export interface ContentTypes {
 }
 
 export function parseContentTypes(xml: string): ContentTypes {
-  const doc = parseXml(xml);
+  const doc = parseXml(xml, { budget: new NodeBudget(PACKAGE_LIMITS.maxPartNodes) });
   const root = kid(doc as unknown as XElement, "Types");
   const defaults = new Map<string, string>();
   const overrides = new Map<string, string>();
@@ -35,7 +35,7 @@ export interface Relationship {
 }
 
 export function parseRels(xml: string): Relationship[] {
-  const doc = parseXml(xml);
+  const doc = parseXml(xml, { budget: new NodeBudget(PACKAGE_LIMITS.maxPartNodes) });
   const root = kid(doc as unknown as XElement, "Relationships");
   const out: Relationship[] = [];
   for (const r of kids(root, "Relationship")) {

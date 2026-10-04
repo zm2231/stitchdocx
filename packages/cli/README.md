@@ -9,6 +9,23 @@ and the only place the wire field `flagId` exists (the core's neutral name for
 the same correlation field is `ref`; every op carries it and every receipt
 echoes it).
 
+## Whole-document refusals
+
+A document the engine will not hold within its memory bounds is refused as a
+whole: every command prints `{ "refused": { "reason", "detail" } }` and exits
+0, so the caller can route the document elsewhere. `reason` is one of
+`package_too_large` (an entry or the whole archive inflates past its limit),
+`too_many_entries`, `duplicate_entry`, `encrypted_entry`,
+`unreadable_archive`, or `document_too_large`: the main document part is over
+8 MiB, or a parse would build more nodes than its budget allows (40,000 for
+the main part's block structure plus the paragraphs an edit or decision
+parses, 60,000 for any other part). Node budgets bound what bytes cannot: a
+small part can hold a dense grid of tiny cells. The limits are sized for a
+128 MB Worker isolate: the heaviest document built to sit just inside all of
+them (a 7.9 MB main part of 19,000 table cells, with styles and numbering
+parts near 60,000 nodes each) runs normalize, apply and verify in one workerd
+request under an 87 MB V8 heap cap.
+
 ## Commands
 
 ### `normalize <in.docx> <out.docx>`

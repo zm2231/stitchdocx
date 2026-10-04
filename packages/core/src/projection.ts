@@ -6,7 +6,7 @@
 //
 // One walker serves two consumers: paragraphText (projection) and the span
 // map (mutation input), so text and offsets can never disagree.
-import { decodeAttrValue, decodeText, kid, kids, type XElement } from "@stitchdocx/package-io";
+import { decodeAttrValue, decodeText, isPending, kid, kids, pendingSource, readView, type XElement } from "@stitchdocx/package-io";
 import { walkBody, rowsOf, cellsOf, rowRevision, type BodyContext, type BodyWalk } from "./body.js";
 import { stepFields } from "./fields.js";
 import type { StyleSheet } from "./styles.js";
@@ -201,6 +201,8 @@ export interface ProjectionParagraph {
   inContentControl: boolean;
   style: string | null;
   numbered: boolean;
+  /** the paragraph's own w:numPr reference, when it has one */
+  numPr: NumPrRef | null;
   /** name of the revision element on this paragraph's removed mark, if the
    *  mark is not visible under the view ("w:del" = a deleted mark under
    *  accept, "w:ins" = an inserted mark under reject) */
@@ -222,12 +224,24 @@ export function markRevision(p: XElement): XElement | null {
   return kids(rPr).find((c) => REVISION_NAMES.has(c.name)) ?? null;
 }
 
-export function paragraphProps(p: XElement): { style: string | null; numbered: boolean } {
+/** a w:numPr as written: numId and ilvl values, each null when absent */
+export interface NumPrRef {
+  numId: string | null;
+  ilvl: string | null;
+}
+
+export function paragraphProps(p: XElement): { style: string | null; numbered: boolean; numPr: NumPrRef | null } {
   const pPr = kid(p, "w:pPr");
   const pStyle = pPr ? kid(pPr, "w:pStyle") : undefined;
+  const numPr = pPr ? kid(pPr, "w:numPr") : undefined;
+  const val = (name: string) => {
+    const e = numPr ? kid(numPr, name) : undefined;
+    return e ? attrVal(e, "w:val") : null;
+  };
   return {
     style: pStyle ? attrVal(pStyle, "w:val") : null,
-    numbered: Boolean(pPr && kid(pPr, "w:numPr")),
+    numbered: Boolean(numPr),
+    numPr: numPr ? { numId: val("w:numId"), ilvl: val("w:ilvl") } : null,
   };
 }
 
@@ -240,8 +254,14 @@ export function paragraphProps(p: XElement): { style: string | null; numbered: b
  *   disappears, and any other removed mark stays;
  * - at the end of the body or of a content control, the paragraph stays,
  *   empty or not.
+ *
+ * With `only`, the result is just the records with those addresses. Every
+ * paragraph is still walked, since a removed mark or a field can reach across
+ * paragraphs, but an unparsed paragraph outside `only` whose source holds no
+ * revision or field markup cannot (its mark is visible and it leaves the field
+ * cursor as it found it), so it is passed over without being parsed.
  */
-export function projectParagraphs(walk: BodyWalk, view: View, styles: StyleSheet): ProjectionParagraph[] {
+export function projectParagraphs(walk: BodyWalk, view: View, styles: StyleSheet, only?: ReadonlySet<string>): ProjectionParagraph[] {
   const out: ProjectionParagraph[] = [];
   let tableIndex = -1;
   // the complex-field cursor is threaded through the whole story: a TOC's
@@ -253,15 +273,23 @@ export function projectParagraphs(walk: BodyWalk, view: View, styles: StyleSheet
     let pending = carry;
     for (const c of kids(node)) {
       if (c.name === "w:p") {
-        const mark = markRevision(c);
-        const props = paragraphProps(c);
+        if (only && !only.has(attrVal(c, "w14:paraId") ?? "") && isPending(c) && !CROSSES_PARAGRAPHS.test(pendingSource(c)!)) {
+          // its record, carried text and all, is not one asked for
+          pending = null;
+          continue;
+        }
+        // an unparsed paragraph is read through a view dropped after this
+        // record, so listing never holds more than one paragraph parsed
+        const content = readView(c);
+        const mark = markRevision(content);
+        const props = paragraphProps(content);
         const record: ProjectionParagraph = {
           addr: attrVal(c, "w14:paraId"),
           container: ctx.cell ? "cell" : "body",
           table: ctx.table ?? null,
           inContentControl: ctx.sdt,
           ...props,
-          text: (pending?.text ?? "") + paragraphText(c, view, styles, fields),
+          text: (pending?.text ?? "") + paragraphText(content, view, styles, fields),
           removedMark: null,
           carried: pending !== null,
           merged: pending ? [...pending.merged, pending.node] : [],
@@ -314,5 +342,9 @@ export function projectParagraphs(walk: BodyWalk, view: View, styles: StyleSheet
 
   const left = visit(walk.body, { cell: false, sdt: false });
   if (left) out.push(left);
-  return out;
+  return only ? out.filter((r) => only.has(r.addr ?? "")) : out;
 }
+
+/** markup through which a paragraph can affect another's record: a tracked
+ *  change (which may sit on its mark) or a complex or simple field */
+const CROSSES_PARAGRAPHS = /<w:(?:ins|del|moveFrom|moveTo)[\s/>]|<w:fld(?:Char|Simple)[\s/>]/;

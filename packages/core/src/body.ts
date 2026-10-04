@@ -4,8 +4,9 @@
 // view-independent (addressing); the projection (views, mark merging) lives in
 // projection.ts. Each paragraph's complex-field cursor state at entry is
 // recorded so per-paragraph walks (span maps) agree with the whole-story walk.
-import { kid, kids, type XElement } from "@stitchdocx/package-io";
+import { isPending, kid, kids, parseXml, pendingSource, readView, type XDoc, type XElement } from "@stitchdocx/package-io";
 import { stepFields } from "./fields.js";
+import { mainPartBudget } from "./limits.js";
 
 export interface BodyContext {
   cell: boolean;
@@ -19,10 +20,24 @@ export interface BodyWalk {
   paragraphs: XElement[];
   /** per-paragraph context, same order */
   contexts: BodyContext[];
-  /** per-paragraph complex-field cursor state at entry, same order */
+  /** complex-field cursor state at entry, for each paragraph entered inside
+   *  a field (any other paragraph enters with none) */
   fieldStates: Map<XElement, string[]>;
   /** w:body element */
   body: XElement;
+}
+
+/** the elements that give the main part its block structure; parseMainPart
+ *  parses only these, and every other element keeps its content as source */
+const BLOCK_STRUCTURE = new Set(["w:document", "w:body", "w:tbl", "w:tr", "w:tc", "w:sdt", "w:sdtContent", "w:customXml"]);
+
+/** the main part with only its block structure parsed: paragraphs and
+ *  property subtrees are lazy (package-io LazyElement) */
+export function parseMainPart(source: string): { tree: XDoc; root: XElement } {
+  const tree = parseXml(source, { lazy: (name) => !BLOCK_STRUCTURE.has(name), budget: mainPartBudget() });
+  const root = kid(tree as unknown as XElement, "w:document");
+  if (!root) throw new Error("the main document part has no w:document root");
+  return { tree, root };
 }
 
 export function walkBody(documentRoot: XElement): BodyWalk {
@@ -37,7 +52,7 @@ export function walkBody(documentRoot: XElement): BodyWalk {
   const visit = (node: XElement, ctx: BodyContext): void => {
     for (const c of kids(node)) {
       if (c.name === "w:p") {
-        fieldStates.set(c, [...fields]);
+        if (fields.length > 0) fieldStates.set(c, [...fields]);
         advance(c);
         paragraphs.push(c);
         contexts.push(ctx);
@@ -63,15 +78,18 @@ export function walkBody(documentRoot: XElement): BodyWalk {
     }
   };
 
-  /** advance the shared field cursor over a non-paragraph block */
+  /** advance the shared field cursor over a block; an unparsed paragraph is
+   *  read through a transient view, and only when it holds a fldChar */
   const advance = (node: XElement): void => {
     const walk = (n: XElement): void => {
       for (const c of kids(n)) {
         stepFields(fields, c);
-        walk(c);
+        if (!isPending(c)) walk(c);
+        else if (pendingSource(c)!.includes("fldChar")) walk(readView(c));
       }
     };
-    walk(node);
+    if (!isPending(node)) walk(node);
+    else if (pendingSource(node)!.includes("fldChar")) walk(readView(node));
   };
 
   visit(body, { cell: false, sdt: false });
@@ -116,7 +134,7 @@ export function cellsOf(tr: XElement): XElement[] {
 export function rowRevision(tr: XElement): XElement | null {
   const trPr = kid(tr, "w:trPr");
   if (!trPr) return null;
-  return kids(trPr).find((c) => c.name === "w:del" || c.name === "w:ins") ?? null;
+  return kids(readView(trPr)).find((c) => c.name === "w:del" || c.name === "w:ins") ?? null;
 }
 
 /** nearest ancestor satisfying pred, stopping at (and including) the element itself */

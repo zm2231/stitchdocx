@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { SaxesParser } from "saxes";
 import { decodePart, entryBytes, readPackage } from "./zip.js";
-import { parseXml, serializeXml } from "./xml.js";
+import { materialize, parseXml, pendingElements, serializeXml } from "./xml.js";
 
 const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
@@ -78,6 +78,19 @@ d("D1 parser spike" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"
     // pinned denominator: a regression in fixture discovery or part selection
     // must fail loudly. Bump when the acceptance fixture corpus changes.
     expect(parts).toBe(561);
+    expect(bad).toEqual([]);
+  });
+
+  it("lazy paragraphs: unparsed and fully parsed, serialize(parse(x)) === x for every part", () => {
+    const bad: string[] = [];
+    for (const docx of fixtures) {
+      for (const [name, xml] of xmlParts(docx)) {
+        const tree = parseXml(xml, { lazy: (name) => name === "w:p" || name.endsWith("Pr") });
+        if (serializeXml(tree) !== xml) bad.push(`${docx} ${name}: unparsed`);
+        for (const top of tree.children) if (top.kind === "el") for (const p of [...pendingElements(top)]) materialize(p);
+        if (serializeXml(tree) !== xml) bad.push(`${docx} ${name}: parsed`);
+      }
+    }
     expect(bad).toEqual([]);
   });
 

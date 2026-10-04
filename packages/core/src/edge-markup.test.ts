@@ -316,8 +316,8 @@ describe("accept-with-wording replaces the whole changed span (F1)", () => {
         { ref: "b", changeIds: first.receipts[1]!.changeIds, decision: "accept", text: "Z", expectText: "nowhere" },
       ]),
     ).toThrow(/covers its changes nowhere/);
-    expect(() => doc.apply([{ op: "delete", ref: "c", author: AUTHOR, addr: "10000001", start: 18, end: 22, expectText: "pply" }], { date: DATE })).toThrow(/unusable after a failed decide/);
-    expect(() => doc.save()).toThrow(/unusable after a failed decide/);
+    expect(() => doc.apply([{ op: "delete", ref: "c", author: AUTHOR, addr: "10000001", start: 18, end: 22, expectText: "pply" }], { date: DATE })).toThrow(/unusable after a failed edit/);
+    expect(() => doc.save()).toThrow(/unusable after a failed edit/);
   });
 });
 
