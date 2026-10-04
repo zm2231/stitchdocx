@@ -6,10 +6,9 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { decodeAttrValue, decodePart, mainPartName, readPackage, parseXml, kid, entryBytes } from "@stitchdocx/package-io";
-import { walkBody } from "./body.js";
-import { projectParagraphs, type View } from "./projection.js";
-import { StyleSheet } from "./styles.js";
+import { decodeAttrValue, decodePart, mainPartName, readPackage, parseXml, entryBytes } from "@stitchdocx/package-io";
+import { openDocument } from "./document.js";
+import type { View } from "./projection.js";
 
 const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
@@ -60,10 +59,7 @@ const VIEWS: Array<{ name: string; mine: "accept" | "reject"; reader: "accept" |
 ];
 
 function ourProject(bytes: Uint8Array, view: View) {
-  const entries = readPackage(bytes);
-  const tree = parseXml(decodePart(entryBytes(entries.get(mainPartName(entries))!)));
-  const root = kid(tree as any, "w:document")!;
-  return projectParagraphs(walkBody(root), view, StyleSheet.empty);
+  return openDocument(bytes).projectionRecords(view);
 }
 
 const readerProject = (bytes: Uint8Array, v: unknown) =>

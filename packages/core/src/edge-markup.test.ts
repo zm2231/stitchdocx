@@ -301,6 +301,24 @@ describe("accept-with-wording replaces the whole changed span (F1)", () => {
     expect(() => finalizeDocx(first.out, [{ ref: "j", changeIds: ids, decision: "accept", text: "X", expectText: "Fee A" }])).toThrow(/covers its changes nowhere/);
     expect(() => finalizeDocx(first.out, [{ ref: "j", changeIds: ["999"], decision: "accept" }])).toThrow(/change 999, which is not a revision/);
   });
+
+  it("a failed decide leaves nothing to save or edit: its earlier decisions cannot leak", () => {
+    const body = P("10000001", R("Fee A and Fee B apply."));
+    const ops: Op[] = [
+      { op: "replace", ref: "a", author: AUTHOR, addr: "10000001", start: 4, end: 5, expectText: "A", text: "X" },
+      { op: "replace", ref: "b", author: AUTHOR, addr: "10000001", start: 14, end: 15, expectText: "B", text: "C" },
+    ];
+    const first = runApply(body, ops);
+    const doc = openDocument(first.out);
+    expect(() =>
+      doc.decide([
+        { ref: "a", changeIds: first.receipts[0]!.changeIds, decision: "reject" },
+        { ref: "b", changeIds: first.receipts[1]!.changeIds, decision: "accept", text: "Z", expectText: "nowhere" },
+      ]),
+    ).toThrow(/covers its changes nowhere/);
+    expect(() => doc.apply([{ op: "delete", ref: "c", author: AUTHOR, addr: "10000001", start: 18, end: 22, expectText: "pply" }], { date: DATE })).toThrow(/unusable after a failed decide/);
+    expect(() => doc.save()).toThrow(/unusable after a failed decide/);
+  });
 });
 
 describe("verify is a whole-package gate (F8)", () => {

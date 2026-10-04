@@ -77,7 +77,7 @@ d("D1 parser spike" + (ACCEPTANCE ? "" : " (skipped: DOCX_ACCEPTANCE_DIR unset)"
     console.log(`fidelity: ${parts - bad.length}/${parts} parts byte-identical (${(bytes / 1024).toFixed(0)} KiB)`);
     // pinned denominator: a regression in fixture discovery or part selection
     // must fail loudly. Bump when the acceptance fixture corpus changes.
-    expect(parts).toBe(554);
+    expect(parts).toBe(561);
     expect(bad).toEqual([]);
   });
 

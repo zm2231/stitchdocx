@@ -88,6 +88,7 @@ export class Document {
   /** projection under a view; addresses are w14:paraId (present after normalize).
    *  Numbering labels are computed per call — no counter state survives. */
   projection(view: View = acceptAll): Paragraph[] {
+    this.assertUsable();
     const model = this.numberingModel();
     const counters = new Map<string, (number | undefined)[]>();
     return projectParagraphs(this.walk, view, this.styles).map((p) => this.toPublicParagraph(p, model, counters));
@@ -95,6 +96,7 @@ export class Document {
 
   /** raw projection records (engine-internal shape with merged nodes) */
   projectionRecords(view: View = acceptAll): ProjectionParagraph[] {
+    this.assertUsable();
     return projectParagraphs(this.walk, view, this.styles);
   }
 
@@ -136,6 +138,7 @@ export class Document {
   }
 
   apply(ops: Op[], opts: { date: string }): Receipt[] {
+    this.assertUsable();
     if (!isIsoDate(opts.date)) throw new Error(`date must be an ISO 8601 timestamp, got ${JSON.stringify(opts.date)}`);
     this.recordTextCache = null;
     // the addressable surface is the projection's listing: unlisted addresses
@@ -204,10 +207,12 @@ export class Document {
    * Resolve each decision's revisions, named by the receipt's changeIds.
    * Throws, naming the decision, when an id is not a revision in the
    * document, when two decisions name the same id, or when accept-with-wording
-   * cannot place the member's text. A throw leaves this Document partly
-   * decided; finalizeDocx discards it and writes nothing.
+   * cannot place the member's text. Id checks run before anything changes;
+   * a failure after that leaves this Document partly decided, so every later
+   * call on it throws.
    */
   decide(decisions: Decision[]): DecisionResult[] {
+    this.assertUsable();
     const byId = new Map<string, XElement[]>();
     for (const rev of allRevisions(this.root)) {
       const id = getAttr(rev, "w:id");
@@ -224,14 +229,27 @@ export class Document {
         claimed.set(id, index);
       }
     });
-    const results = decisions.map((d, index): DecisionResult => {
-      const matched = new Set(d.changeIds.flatMap((id) => byId.get(id) ?? []));
-      if (d.text === undefined) resolveRevisions(this.root, (rev) => matched.has(rev), d.decision);
-      else this.acceptWithText(d, index, matched);
-      return { index, ref: d.ref, decision: d.decision, changeIds: [...d.changeIds] };
-    });
+    // from here decisions mutate the tree; a failure leaves it partly decided
+    let results: DecisionResult[];
+    try {
+      results = decisions.map((d, index): DecisionResult => {
+        const matched = new Set(d.changeIds.flatMap((id) => byId.get(id) ?? []));
+        if (d.text === undefined) resolveRevisions(this.root, (rev) => matched.has(rev), d.decision);
+        else this.acceptWithText(d, index, matched);
+        return { index, ref: d.ref, decision: d.decision, changeIds: [...d.changeIds] };
+      });
+    } catch (e) {
+      this.broken = e instanceof Error ? e.message : String(e);
+      throw e;
+    }
     if (results.length > 0) this.markDirty();
     return results;
+  }
+
+  private broken: string | null = null;
+
+  private assertUsable(): void {
+    if (this.broken !== null) throw new Error(`document is unusable after a failed decide: ${this.broken}`);
   }
 
   /**
@@ -375,6 +393,7 @@ export class Document {
   }
 
   save(): Uint8Array {
+    this.assertUsable();
     if (!this.dirty) return this.originalBytes;
     this.entries.set(this.mainPart, encodePart(serializeXml(this.tree)));
     return writePackage(this.entries);
