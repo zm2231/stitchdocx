@@ -8,7 +8,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { SaxesParser } from "saxes";
-import { decodePart, readPackage } from "./zip.js";
+import { decodePart, entryBytes, readPackage } from "./zip.js";
 import { parseXml, serializeXml } from "./xml.js";
 
 const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
@@ -27,7 +27,7 @@ const xmlParts = (docx: string): Array<[string, string]> => {
   const entries = readPackage(readFileSync(docx));
   return [...entries]
     .filter(([name]) => name.endsWith(".xml") || name.endsWith(".rels"))
-    .map(([name, bytes]) => [name, decodePart(bytes)]);
+    .map(([name, bytes]) => [name, decodePart(entryBytes(bytes))]);
 };
 
 // saxes contrast: the reader's parser + a plain serializer

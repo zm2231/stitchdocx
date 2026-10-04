@@ -16,7 +16,21 @@ import {
 } from "@stitchdocx/package-io";
 import { REVISION_NAMES, markRevision } from "./projection.js";
 
-export const REVISION_ALL = [...REVISION_NAMES, "w:rPrChange", "w:pPrChange", "w:sectPrChange", "w:tblPrChange"];
+export const REVISION_ALL = [...REVISION_NAMES, "w:rPrChange", "w:pPrChange", "w:sectPrChange", "w:tblPrChange", "w:tcPrChange", "w:trPrChange"];
+
+/** every element type that carries a tracked-change w:id — the allocator must
+ *  be seeded above the largest id on ANY of them, across every part */
+export const REVISION_ID_NAMES = new Set([
+  ...REVISION_ALL,
+  "w:numberingChange",
+  "w:cellIns",
+  "w:cellDel",
+  "w:cellMerge",
+  "w:moveFromRangeStart",
+  "w:moveFromRangeEnd",
+  "w:moveToRangeStart",
+  "w:moveToRangeEnd",
+]);
 
 export function isRevisionEl(e: XElement): boolean {
   return REVISION_ALL.includes(e.name);
@@ -46,15 +60,19 @@ export function* walkAll(root: XElement): Generator<XElement> {
   }
 }
 
-/** monotonic w:id allocator, seeded above every existing revision id */
+/** monotonic w:id allocator, seeded above every existing revision id on every
+ *  revision-type element across every part root given */
 export class RevisionIdAllocator {
   private next: number;
-  constructor(root: XElement) {
+  constructor(roots: Iterable<XElement>) {
     let max = 0;
-    for (const r of revisionElements(root)) {
-      const id = getAttr(r, "w:id");
-      const n = id === null ? NaN : Number(id);
-      if (Number.isInteger(n) && n > max) max = n;
+    for (const root of roots) {
+      for (const r of walkAll(root)) {
+        if (!REVISION_ID_NAMES.has(r.name)) continue;
+        const id = getAttr(r, "w:id");
+        const n = id === null ? NaN : Number(id);
+        if (Number.isInteger(n) && n > max) max = n;
+      }
     }
     this.next = max + 1;
   }
@@ -64,22 +82,31 @@ export class RevisionIdAllocator {
 }
 
 const PARAID_MAX = 0x7fffffff;
+const PARAID_VALID = /^[0-9A-Fa-f]{8}$/;
 
-/** deterministic w14:paraId allocator over the document's existing ids */
+/**
+ * deterministic w14:paraId allocator over every id already used anywhere in
+ * the document (body paragraphs AND other parts — ids must not collide).
+ * Ids that are not 8 hex digits below 0x80000000 are not reused.
+ */
 export class ParaIdAllocator {
   private next: number;
   private used: Set<string>;
-  constructor(paragraphs: XElement[]) {
+  constructor(ids: Iterable<string>) {
     this.used = new Set();
     let max = 0;
-    for (const p of paragraphs) {
-      const id = getAttr(p, "w14:paraId");
-      if (id === null) continue;
-      this.used.add(id.toUpperCase());
+    for (const id of ids) {
+      const upper = id.toUpperCase();
+      this.used.add(upper);
+      if (!PARAID_VALID.test(id)) continue;
       const n = parseInt(id, 16);
       if (Number.isInteger(n) && n > max && n <= PARAID_MAX) max = n;
     }
     this.next = max >= PARAID_MAX ? 1 : max + 1;
+  }
+  /** whether an id is a usable w14:paraId (8 hex digits below 0x80000000) */
+  static valid(id: string): boolean {
+    return PARAID_VALID.test(id) && parseInt(id, 16) <= PARAID_MAX;
   }
   take(): string {
     let id = "";
@@ -141,16 +168,23 @@ export function textToRunChildren(text: string): XNode[] {
   return children;
 }
 
+/** run properties that hide a run from display — never copied onto a run we
+ *  insert (an invisible tracked change would ship silently) */
+const HIDDEN_PR = new Set(["w:vanish", "w:specVanish", "w:webHidden"]);
+
 /** clone of a run's w:rPr for a NEW run, or null (null-safe on runs without
  *  formatting). Revision records inside the source rPr (a pending formatting
  *  change) are dropped: they belong to the run they were written on, and
- *  copying them would duplicate their w:id. Rendering is unaffected — the
- *  record holds the previous formatting, not the current one. */
+ *  copying them would duplicate their w:id. Hidden-text properties are
+ *  dropped too: our insertions are always visible. Rendering is otherwise
+ *  unaffected — the record holds the previous formatting, not the current
+ *  one. */
 export function cloneRunPr(run: XElement | null): XElement | null {
   const rPr = run ? kid(run, "w:rPr") : null;
   if (!rPr) return null;
   const clone = cloneNode(rPr) as XElement;
   stripRevisionRecords(clone);
+  clone.children = clone.children.filter((c) => !(c.kind === "el" && HIDDEN_PR.has(c.name)));
   return clone;
 }
 

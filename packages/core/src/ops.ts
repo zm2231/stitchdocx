@@ -39,6 +39,13 @@ export interface ApplyDeps {
    *  than the physical paragraph node; receipts report in record space.
    *  Returns null when the address has no record (caller falls back). */
   recordText(addr: Addr, view: View): string | null;
+  /** whether the projection lists `addr` as an editable record ("ok"), lists
+   *  it only as a merged/uneditable view ("merged"), or never lists it
+   *  ("unlisted") — ops are only valid against listed, editable records */
+  addressable(addr: Addr): "ok" | "unlisted" | "merged";
+  /** the paragraph's complex-field cursor state at entry (shared with the
+   *  whole-story walk); callers receive a fresh copy */
+  fieldEntry(para: XElement): string[];
 }
 
 const acceptAllView: View = () => "accept";
@@ -64,11 +71,23 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       refuse(plan, "addr_not_found");
       continue;
     }
+    // ops are authored against the projection's listing: an address that is
+    // not a listed, editable record cannot be operated on (the listing's
+    // coordinates would not match the paragraph's own span map)
+    const addrState = deps.addressable(op.addr);
+    if (addrState === "unlisted") {
+      refuse(plan, "addr_not_found");
+      continue;
+    }
+    if (addrState === "merged") {
+      refuse(plan, "paragraph_not_editable");
+      continue;
+    }
     if (op.op === "insertParagraphAfter") {
       if (!op.text || op.text.trim() === "") refuse(plan, "empty_text");
       else if (op.scope === "table" && !hasAncestor(para, "w:tbl")) refuse(plan, "addr_not_found");
-      else if (!op.scope && inPlainTextControl(para)) refuse(plan, "insert_in_plain_text_control");
-      else if (!op.scope && nextBlockSibling(para)?.name !== "w:p" && markRevision(para)) {
+      else if (op.scope !== "table" && inPlainTextControl(para)) refuse(plan, "insert_in_plain_text_control");
+      else if (op.scope !== "table" && nextBlockSibling(para)?.name !== "w:p" && markRevision(para)) {
         // at a container end the insert must track the ANCHOR's paragraph
         // mark (Word's form); an anchor whose mark is already tracked by any
         // author cannot carry ours, and Word could not reject the result
@@ -76,7 +95,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       }
       continue;
     }
-    const map = getMap(maps, para);
+    const map = getMap(maps, para, deps);
     if (
       !Number.isInteger(op.start) ||
       !Number.isInteger(op.end) ||
@@ -84,6 +103,12 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       op.end < op.start ||
       op.end > map.text.length
     ) {
+      refuse(plan, "span_out_of_range");
+      continue;
+    }
+    // an offset that falls between the halves of a surrogate pair would
+    // silently destroy the character (the parser strips lone halves)
+    if (splitsSurrogate(map.text, op.start) || splitsSurrogate(map.text, op.end)) {
       refuse(plan, "span_out_of_range");
       continue;
     }
@@ -191,14 +216,22 @@ function refuse(plan: Plan, reason: NonNullable<Receipt["reason"]>): void {
   plan.reason = reason;
 }
 
-function getMap(maps: Map<Addr, SpanMap>, para: XElement): SpanMap {
+function getMap(maps: Map<Addr, SpanMap>, para: XElement, deps: ApplyDeps): SpanMap {
   const addr = paraAddr(para);
   let map = addr ? maps.get(addr) : undefined;
   if (!map) {
-    map = buildSpanMap(para, acceptAllView);
+    map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
     if (addr) maps.set(addr, map);
   }
   return map;
+}
+
+/** true when `pos` falls between the high and low halves of a surrogate pair */
+function splitsSurrogate(text: string, pos: number): boolean {
+  if (pos <= 0 || pos >= text.length) return false;
+  const hi = text.charCodeAt(pos - 1);
+  const lo = text.charCodeAt(pos);
+  return hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff;
 }
 
 function paraAddr(p: XElement): Addr | null {
@@ -277,11 +310,11 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   // rebuild the map after each split: splitting changes the tree (text is
   // preserved, so offsets stay valid), and stale piece references would
   // split already-split runs and corrupt the paragraph
-  let map = buildSpanMap(para, acceptAllView);
+  let map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
   splitAt(map, start, () => deps.ids.take());
-  map = buildSpanMap(para, acceptAllView);
+  map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
   splitAt(map, end, () => deps.ids.take());
-  map = buildSpanMap(para, acceptAllView);
+  map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
   const covered = map.pieces.filter((pc) => pc.start >= start && pc.end <= end);
   const runs: XElement[] = [];
   for (const pc of covered) if (!runs.includes(pc.run)) runs.push(pc.run);
@@ -329,7 +362,7 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   return { ids: delEls.map((d) => d.attrs.find((a) => a.name === "w:id")!.raw), firstRunPr, lastDelEl: delEls[delEls.length - 1]! };
 }
 
-function* descendantsOf(root: XElement): Generator<XElement> {
+export function* descendantsOf(root: XElement): Generator<XElement> {
   for (const c of root.children) {
     if (c.kind === "el") {
       yield c;
@@ -358,9 +391,9 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
   ins.children.push(run);
   run.parent = ins;
   // ensure no run straddles the insertion point, then place the ins between runs
-  let map = buildSpanMap(para, acceptAllView);
+  let map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
   splitAt(map, at, () => deps.ids.take());
-  map = buildSpanMap(para, acceptAllView);
+  map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
   const pc = pieceAt(map, at);
   let parent: XElement;
   let index: number;
@@ -547,7 +580,7 @@ function firstRun(p: XElement): XElement | null {
  * split runs at piece boundaries, so the covered pieces after both splits
  * belong to runs that are fully covered.
  */
-function splitAt(map: SpanMap, pos: number, takeId: () => string): void {
+export function splitAt(map: SpanMap, pos: number, takeId: () => string): void {
   const pc = pieceAt(map, pos);
   if (!pc) return;
   if (pc.kind === "text" && pc.start < pos && pos < pc.end) {

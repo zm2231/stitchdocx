@@ -1,7 +1,7 @@
 // Light part registry: [Content_Types].xml and relationship parts. The gate
 // never adds or removes parts, so this exists to answer "what is this part"
 // questions and to keep door open for later phases (comments, headers).
-import { decodePart, type Entries } from "./zip.js";
+import { decodePart, entryBytes, type EntryData } from "./zip.js";
 import { decodeEntities, kid, kids, parseXml, serializeXml, type XElement, type XDoc } from "./xml.js";
 
 export interface ContentTypes {
@@ -60,12 +60,12 @@ const REL_BASES = [
 /** The part a relationship of `type` points to from `source` ("" for the
  *  package), resolved per OPC: an absolute target is package-relative, any
  *  other is relative to the source's folder. Null when absent or external. */
-export function relatedPart(entries: Entries, source: string, type: string): string | null {
+export function relatedPart(entries: Parts, source: string, type: string): string | null {
   const slash = source.lastIndexOf("/");
   const dir = source.slice(0, slash + 1);
   const relsXml = entries.get(`${dir}_rels/${source.slice(slash + 1)}.rels`);
   if (!relsXml) return null;
-  const rel = parseRels(decodePart(relsXml)).find(
+  const rel = parseRels(decodePart(entryBytes(relsXml))).find(
     (r) => r.targetMode !== "External" && REL_BASES.some((ns) => r.type === ns + type),
   );
   if (!rel) return null;
@@ -75,9 +75,35 @@ export function relatedPart(entries: Entries, source: string, type: string): str
   return out.join("/");
 }
 
+/** every part a relationship of `type` points to from `source`, in
+ *  relationship order (a document can carry several headers/footers) */
+export function relatedParts(entries: Parts, source: string, type: string): string[] {
+  const slash = source.lastIndexOf("/");
+  const dir = source.slice(0, slash + 1);
+  const relsXml = entries.get(`${dir}_rels/${source.slice(slash + 1)}.rels`);
+  if (!relsXml) return [];
+  const out: string[] = [];
+  for (const rel of parseRels(decodePart(entryBytes(relsXml)))) {
+    if (r_targetModeExternal(rel) || !REL_BASES.some((ns) => rel.type === ns + type)) continue;
+    const parts = (rel.target.startsWith("/") ? rel.target.slice(1) : dir + rel.target).split("/");
+    const path: string[] = [];
+    for (const x of parts) (x === ".." ? path.pop() : x !== "." && path.push(x));
+    out.push(path.join("/"));
+  }
+  return out;
+}
+
+const r_targetModeExternal = (rel: Relationship): boolean => rel.targetMode === "External";
+
+/** anything that can hand back part bytes by name (an Entries map or a
+ *  PackageReader) */
+export interface Parts {
+  get(name: string): EntryData | undefined;
+}
+
 /** the main document part, named through the package's officeDocument
  *  relationship; the conventional name is the fallback */
-export function mainPartName(entries: Entries): string {
+export function mainPartName(entries: Parts): string {
   return relatedPart(entries, "", "officeDocument") ?? "word/document.xml";
 }
 

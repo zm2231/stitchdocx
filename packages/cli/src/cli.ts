@@ -9,7 +9,7 @@
 // calls it `ref` (a neutral caller id echoed on receipts). This adapter maps
 // between the two and is the only place the wire name exists.
 import { readFileSync, writeFileSync } from "node:fs";
-import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision, type RevisionDecision } from "@stitchdocx/core";
+import { isIsoDate, normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision, type RevisionDecision } from "@stitchdocx/core";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -27,6 +27,7 @@ const toCoreOp = (o: WireOp, index: number): Op => {
   const { flagId, ...rest } = o;
   const ref = rest.ref ?? flagId;
   if (!ref) fail(`op ${index} is missing its flagId`);
+  if (typeof rest.author !== "string" || rest.author.trim() === "") fail(`op ${index} (flagId ${ref}) needs a non-empty author`);
   return { ...rest, ref } as Op;
 };
 
@@ -40,6 +41,11 @@ const toCoreReceipt = (r: WireReceipt, index: number): Receipt => {
 const toWireReceipt = (r: Receipt): WireReceipt => {
   const { ref, ...rest } = r;
   return { ...rest, flagId: ref };
+};
+
+const requireDate = (value: unknown, what: string): string => {
+  if (!isIsoDate(value)) fail(`${what} must be an ISO 8601 timestamp (e.g. 2026-01-01T00:00:00Z), got ${JSON.stringify(value)}`);
+  return value;
 };
 
 try {
@@ -66,8 +72,9 @@ try {
       const [inp, opsPath, outp] = args;
       if (!inp || !opsPath || !outp) fail("usage: apply <in.docx> <ops.json> <out.docx>");
       const spec = JSON.parse(readFileSync(opsPath, "utf8")) as { date: string; ops: WireOp[] };
+      const date = requireDate(spec.date, "date");
       const doc = openDocument(new Uint8Array(readFileSync(inp)));
-      const receipts: Receipt[] = doc.apply((spec.ops ?? []).map(toCoreOp), { date: spec.date });
+      const receipts: Receipt[] = doc.apply((spec.ops ?? []).map(toCoreOp), { date });
       writeFileSync(outp, doc.save());
       out({ receipts: receipts.map(toWireReceipt) });
       break;
@@ -76,23 +83,32 @@ try {
       const [inp, decPath, outp] = args;
       if (!inp || !decPath || !outp) fail("usage: finalize <in.docx> <decisions.json> <out.docx>");
       const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: Array<Omit<Decision, "ref"> & { ref?: string; flagId?: string }> };
+      if (spec.date !== undefined) requireDate(spec.date, "date");
       const doc = openDocument(new Uint8Array(readFileSync(inp)));
-      const results: Array<{ flagId: string; author: string; decision: string; resolved: number }> = [];
-      // resolve exactly the authors named in the decisions — revisions by
-      // anyone else (including earlier runs' work in a re-uploaded redline)
-      // must survive untouched
+      const results: Array<{ flagId: string; author: string | null; decision: string; resolved: number }> = [];
+      // a decision resolves exactly the revisions it names — the receipt's
+      // changeIds (or, legacy, exactly that author; revisions by anyone else
+      // survive untouched). A decision that matches nothing fails: silence
+      // here would resolve nothing and report success.
       for (const [index, d] of (spec.decisions ?? []).entries()) {
         const ref = d.ref ?? d.flagId;
         if (!ref) fail(`decision ${index} is missing its flagId`);
+        if (!Array.isArray(d.changeIds) && (typeof d.author !== "string" || d.author.trim() === "")) {
+          fail(`decision ${index} (flagId ${ref}) needs changeIds or a non-empty author`);
+        }
         const core: Decision = { ...d, ref };
         if (core.text !== undefined) {
           const resolved = doc.acceptWithText(core);
-          results.push({ flagId: d.flagId ?? ref, author: d.author, decision: "accept", resolved });
+          if (resolved === 0) fail(`decision ${index} (flagId ${ref}) matched no revisions`);
+          results.push({ flagId: d.flagId ?? ref, author: d.author ?? null, decision: "accept", resolved });
         } else {
-          const engineDecision: RevisionDecision = { author: d.author, decision: d.decision };
+          const engineDecision: RevisionDecision = "changeIds" in d && Array.isArray(d.changeIds)
+            ? { changeIds: d.changeIds.map(String), decision: d.decision }
+            : { author: d.author!, decision: d.decision };
           const decided = doc.decide([engineDecision]);
           const resolved = decided.reduce((n, r) => n + r.changeIds.length, 0);
-          results.push({ flagId: d.flagId ?? ref, author: d.author, decision: d.decision, resolved });
+          if (resolved === 0) fail(`decision ${index} (flagId ${ref}) matched no revisions`);
+          results.push({ flagId: d.flagId ?? ref, author: d.author ?? null, decision: d.decision, resolved });
         }
       }
       writeFileSync(outp, doc.save());

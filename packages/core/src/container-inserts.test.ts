@@ -3,7 +3,7 @@
 // form so Reject All can remove it, and the engine's decide/verify must
 // handle both that form and the mid-container form.
 import { describe, expect, it } from "vitest";
-import { encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
+import { encodePart, readPackage, writePackage, entryBytes } from "@stitchdocx/package-io";
 import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt } from "./index.js";
 
 const DATE = "2026-10-03T00:00:00Z";
@@ -29,7 +29,7 @@ function runOn(bodyXml: string, ops: Op[]): { receipts: Receipt[]; out: Uint8Arr
 }
 
 function xmlOf(bytes: Uint8Array): string {
-  return new TextDecoder().decode(readPackage(bytes).get("word/document.xml")!);
+  return new TextDecoder().decode(entryBytes(readPackage(bytes).get("word/document.xml")!));
 }
 
 /** the source of one paragraph, from its paraId to its end tag */
@@ -188,7 +188,7 @@ describe("mid-container inserts keep the previous form", () => {
     // the mid-container form never touches the anchor: a formatting tamper
     // on it must fail verification even though an op addressed the paragraph
     const entries = readPackage(out);
-    const xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
     entries.set("word/document.xml", encodePart(xml.replace('<w:jc w:val="left"/>', '<w:jc w:val="center"/>')));
     expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
   });
@@ -222,7 +222,7 @@ describe("verify catches formatting tamper on untouched paragraphs", () => {
     const out = doc.save();
     expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     const entries = readPackage(out);
-    const xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
     entries.set("word/document.xml", encodePart(xml.replace('<w:jc w:val="left"/>', '<w:jc w:val="center"/>')));
     expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
   });

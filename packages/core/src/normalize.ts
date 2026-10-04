@@ -2,22 +2,26 @@
 // one. Idempotent and deterministic; a document that needs nothing comes back
 // byte-for-byte unchanged.
 //
-// No structural repair happens here: the parser is total (it opens anything
-// well-formed, including an empty body-level w:sectPr that other runtimes
-// choke on), so a rewrite would only break the untouched-bytes guarantee.
-import { getAttr, kid, mainPartName, readPackage, relatedPart, setAttr, writePackage, encodePart, decodePart, type Entries, type XElement } from "@stitchdocx/package-io";
-import { parseXml, serializeXml } from "@stitchdocx/package-io";
+// Ids are unique across EVERY WordprocessingML part (a comment or header
+// paragraph's id counts), and ids that are not 8 hex digits below 0x80000000
+// are reassigned wherever they appear. No structural repair happens here: the
+// parser is total (it opens anything well-formed, including an empty
+// body-level w:sectPr that other runtimes choke on), so a rewrite would only
+// break the untouched-bytes guarantee.
+import { decodePart, encodePart, getAttr, kid, mainPartName, openPackage, parseXml, relatedPart, serializeXml, setAttr, writePackage, type PackageReader, type XElement } from "@stitchdocx/package-io";
+import { walkAll } from "./revisions.js";
 import { walkBody } from "./body.js";
 import { ParaIdAllocator } from "./revisions.js";
+import { paraIdsAcrossParts, partRoot, wordprocessingPartNames } from "./parts.js";
 
 export const W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml";
 
 /** the editing restriction Word enforces (word/settings.xml), or null. Only an
  *  enforced w:documentProtection with a known mode counts; the document is
  *  never modified here — callers surface the restriction to the user. */
-export function readProtection(entries: Entries): string | null {
-  const settingsPart = relatedPart(entries, mainPartName(entries), "settings") ?? "word/settings.xml";
-  const settingsXml = entries.get(settingsPart);
+export function readProtection(reader: PackageReader, mainPart: string): string | null {
+  const settingsPart = relatedPart(reader, mainPart, "settings") ?? "word/settings.xml";
+  const settingsXml = reader.part(settingsPart);
   if (!settingsXml) return null;
   const tree = parseXml(decodePart(settingsXml));
   const settings = kid(tree as unknown as XElement, "w:settings");
@@ -30,41 +34,91 @@ export function readProtection(entries: Entries): string | null {
   return edit !== null && ["readOnly", "comments", "trackedChanges", "forms"].includes(edit) ? edit : null;
 }
 
+/** per-part paragraph id repair plan: which paragraphs take a fresh id */
+function planPart(paragraphs: XElement[], globalSeen: Set<string>): XElement[] {
+  const reassign: XElement[] = [];
+  for (const p of paragraphs) {
+    const id = getAttr(p, "w14:paraId");
+    if (id === null) continue;
+    if (!ParaIdAllocator.valid(id)) {
+      reassign.push(p);
+      continue;
+    }
+    const key = id.toUpperCase();
+    if (globalSeen.has(key)) {
+      reassign.push(p);
+      continue;
+    }
+    globalSeen.add(key);
+  }
+  return reassign;
+}
+
+function partParagraphs(root: XElement): XElement[] {
+  return [...walkAll(root)].filter((e) => e.name === "w:p");
+}
+
+/** declare the w14 namespace when a part gains paraId attributes */
+function ensureW14Ns(rootEl: XElement | null): void {
+  if (!rootEl) return;
+  if (!rootEl.attrs.some((a) => a.name === "xmlns:w14")) setAttr(rootEl, "xmlns:w14", W14_NS);
+}
+
 export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: number; protection: string | null } {
-  const entries: Entries = readPackage(bytes);
-  const mainPart = mainPartName(entries);
-  const docXml = entries.get(mainPart);
+  const reader = openPackage(bytes);
+  const mainPart = mainPartName(reader);
+  const docXml = reader.part(mainPart);
   if (!docXml) throw new Error(`${mainPart} missing`);
   const tree = parseXml(decodePart(docXml));
   const root = kid(tree as unknown as XElement, "w:document");
   if (!root) throw new Error("word/document.xml has no w:document root");
   const walk = walkBody(root);
 
-  // paraIds: unique, deterministic, < 0x80000000. Duplicates are repaired:
-  // the first occurrence keeps the id, later ones get fresh ids (document order).
-  const alloc = new ParaIdAllocator(walk.paragraphs);
-  let assigned = 0;
-  const seen = new Set<string>();
-  const reassign: XElement[] = [];
-  for (const p of walk.paragraphs) {
-    const id = getAttr(p, "w14:paraId");
-    if (id === null) continue;
-    const key = id.toUpperCase();
-    if (seen.has(key)) reassign.push(p);
-    else seen.add(key);
+  // seed the allocator with every id used anywhere, then repair: duplicates
+  // (first occurrence keeps the id) and ids that are not 8 hex digits below
+  // 0x80000000 take fresh ids, in every part
+  const alloc = new ParaIdAllocator(paraIdsAcrossParts(reader, mainPart, walk.paragraphs));
+  const globalSeen = new Set<string>();
+  const mainReassign = planPart(walk.paragraphs, globalSeen);
+  // parse each other part once; plan and repair run on the same tree
+  const otherTrees = new Map<string, XElement>();
+  for (const part of wordprocessingPartNames(reader, mainPart).slice(1)) {
+    const partRootEl = partRoot(reader, part);
+    if (partRootEl) otherTrees.set(part, partRootEl);
   }
-  for (const p of walk.paragraphs) {
-    if (getAttr(p, "w14:paraId") !== null && !reassign.includes(p)) continue;
+  const otherPlans = new Map<string, { root: XElement; reassign: XElement[] }>();
+  for (const [part, partRootEl] of otherTrees) {
+    const reassign = planPart(partParagraphs(partRootEl), globalSeen);
+    if (reassign.length > 0) otherPlans.set(part, { root: partRootEl, reassign });
+  }
+
+  let assigned = 0;
+  const reassign = (p: XElement): void => {
     setAttr(p, "w14:paraId", alloc.take());
     assigned++;
+  };
+  for (const p of mainReassign) reassign(p);
+  let bodyNew = 0;
+  for (const p of walk.paragraphs) {
+    if (getAttr(p, "w14:paraId") !== null) continue;
+    reassign(p);
+    bodyNew++;
   }
-  if (assigned > 0) {
-    const hasNs = root.attrs.some((a) => a.name === "xmlns:w14");
-    if (!hasNs) setAttr(root, "xmlns:w14", W14_NS);
+
+  const changedParts = new Map<string, string>();
+  if (mainReassign.length > 0 || bodyNew > 0) {
+    ensureW14Ns(root);
+    changedParts.set(mainPart, serializeXml(tree));
   }
-  if (assigned > 0) {
-    entries.set(mainPart, encodePart(serializeXml(tree)));
-    return { docx: writePackage(entries), assigned, protection: readProtection(entries) };
+  for (const [part, { root: partRootEl, reassign: list }] of otherPlans) {
+    for (const p of list) reassign(p);
+    ensureW14Ns(partRootEl);
+    changedParts.set(part, serializeXml(partRootEl));
   }
-  return { docx: bytes, assigned: 0, protection: readProtection(entries) };
+
+  const protection = readProtection(reader, mainPart);
+  if (changedParts.size === 0) return { docx: bytes, assigned: 0, protection };
+  const entries = reader.readAll((name) => name === mainPart || changedParts.has(name));
+  for (const [name, xml] of changedParts) entries.set(name, encodePart(xml));
+  return { docx: writePackage(entries), assigned, protection };
 }

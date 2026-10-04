@@ -57,6 +57,9 @@ export interface XDoc {
 
 export const isEl = (n: XNode): n is XElement => n.kind === "el";
 
+/** maximum element nesting the parser accepts */
+export const MAX_XML_DEPTH = 512;
+
 // —————————————————————————————————————————————————————————————— parsing
 
 export function parseXml(source: string): XDoc {
@@ -65,7 +68,15 @@ export function parseXml(source: string): XDoc {
   // enforced by matching end tags to the innermost open element
   const stack: XElement[] = [];
   const push = (n: XNode): void => {
-    if (n.kind === "el") n.parent = stack.length ? stack[stack.length - 1]! : null;
+    if (n.kind === "el") {
+      // bound the tree depth: hostile nesting would otherwise blow the stack
+      // in every recursive walk (serialize, clone, resolve)
+      if (stack.length >= MAX_XML_DEPTH) {
+        i = s.length;
+        throw new Error(`xml parse: element nesting deeper than ${MAX_XML_DEPTH}`);
+      }
+      n.parent = stack.length ? stack[stack.length - 1]! : null;
+    }
     if (stack.length) stack[stack.length - 1]!.children.push(n);
     else children.push(n);
   };

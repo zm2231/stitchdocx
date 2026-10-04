@@ -6,7 +6,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { decodePart, decodePart as dec, encodePart, readPackage, writePackage } from "./zip.js";
+import { decodePart, decodePart as dec, encodePart, entryBytes, readPackage, writePackage } from "./zip.js";
 import { parseXml, serializeXml } from "./xml.js";
 
 const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
@@ -81,7 +81,7 @@ describe("M1 package round-trip (synthetic invariants)", () => {
     ]);
     const out = readPackage(writePackage(entries));
     expect([...out.keys()]).toEqual(["word/é.xml", "word/ok.xml"]);
-    expect(new TextDecoder().decode(out.get("word/é.xml")!)).toBe("café");
+    expect(new TextDecoder().decode(entryBytes(out.get("word/é.xml")!))).toBe("café");
   });
 });
 
@@ -95,7 +95,7 @@ d("M1 lossless round-trip over acceptance fixtures" + (ACCEPTANCE ? "" : " (skip
       const out = readPackage(writePackage(entries));
       expect([...out.keys()].sort(), docx).toEqual([...entries.keys()].sort());
       for (const [name, bytes] of entries) {
-        expect(Buffer.from(out.get(name)!).equals(Buffer.from(bytes)), `${docx} ${name}`).toBe(true);
+        expect(Buffer.from(entryBytes(out.get(name)!)).equals(Buffer.from(entryBytes(bytes))), `${docx} ${name}`).toBe(true);
       }
     }
   });
@@ -103,7 +103,7 @@ d("M1 lossless round-trip over acceptance fixtures" + (ACCEPTANCE ? "" : " (skip
   it("document.xml through parse/serialize stays byte-identical (the edit path's untouched guarantee)", () => {
     for (const docx of fixtures) {
       const entries = readPackage(readFileSync(docx));
-      const xml = dec(entries.get("word/document.xml")!);
+      const xml = dec(entryBytes(entries.get("word/document.xml")!));
       expect(serializeXml(parseXml(xml)), docx).toBe(xml);
     }
   });
@@ -112,15 +112,15 @@ d("M1 lossless round-trip over acceptance fixtures" + (ACCEPTANCE ? "" : " (skip
     for (const docx of fixtures) {
       const entries = readPackage(readFileSync(docx));
       const edited = new Map(entries);
-      const xml = decodePart(entries.get("word/document.xml")!);
+      const xml = decodePart(entryBytes(entries.get("word/document.xml")!));
       const tree = parseXml(xml);
       edited.set("word/document.xml", new TextEncoder().encode(serializeXml(tree)));
       const out = readPackage(writePackage(edited));
       for (const [name, bytes] of entries) {
         if (name === "word/document.xml") continue;
-        expect(Buffer.from(out.get(name)!).equals(Buffer.from(bytes)), `${docx} ${name}`).toBe(true);
+        expect(Buffer.from(entryBytes(out.get(name)!)).equals(Buffer.from(entryBytes(bytes))), `${docx} ${name}`).toBe(true);
       }
-      expect(new TextDecoder().decode(out.get("word/document.xml")!)).toBe(xml);
+      expect(new TextDecoder().decode(entryBytes(out.get("word/document.xml")!))).toBe(xml);
     }
   });
 

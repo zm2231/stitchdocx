@@ -3,7 +3,7 @@
 // plain-text content controls, Word's whitespace reading, text boxes, and
 // editing restrictions. Builders construct minimal OOXML packages in-memory.
 import { describe, expect, it } from "vitest";
-import { decodePart, encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
+import { decodePart, encodePart, readPackage, writePackage, entryBytes } from "@stitchdocx/package-io";
 import { normalizeDocx, openDocument, resolveSpan, verifyOutput, type Op } from "./index.js";
 
 const DATE = "2026-10-03T00:00:00Z";
@@ -30,7 +30,7 @@ const runApply = (bodyXml: string, ops: Op[]) => {
   const receipts = doc.apply(ops, { date: DATE });
   return { doc, receipts, out: doc.save() };
 };
-const xmlOf = (bytes: Uint8Array): string => new TextDecoder().decode(readPackage(bytes).get("word/document.xml")!);
+const xmlOf = (bytes: Uint8Array): string => new TextDecoder().decode(entryBytes(readPackage(bytes).get("word/document.xml")!));
 const textsOf = (bytes: Uint8Array, view: "accept" | "reject" = "accept", author = "Client Author"): string[] =>
   openDocument(bytes).projectionRecords((r) => (r.author === author ? view : "accept")).map((p) => p.text);
 
@@ -141,7 +141,7 @@ describe("merged records are views, not edit targets", () => {
     P("10000001", R("Deleted heading"), `<w:rPr><w:del w:id="90" w:author="Client Author" w:date="${DATE}"/></w:rPr>`) +
     `<w:tbl><w:tr><w:tc>${P("10000002", R("Cell text."))}</w:tc></w:tr></w:tbl>` + tail;
 
-  it("the merged listing reports itself, and ops use the cell's own offsets", () => {
+  it("the merged listing reports itself, and every op on it refuses", () => {
     const doc = openDocument(docx(body()));
     const listed = doc.projection();
     expect(listed.map((p) => p.text)).toEqual(["Deleted headingCell text."]);
@@ -152,13 +152,22 @@ describe("merged records are views, not edit targets", () => {
       { op: "delete", ref: "m", author: AUTHOR, addr: "10000002", start: 15, end: 19, expectText: "text" },
     ], { date: DATE });
     expect(refused[0]!.status).toBe("refused");
-    // offsets in the cell paragraph's own space still edit it
-    const ok = runApply(body(), [
+    expect(refused[0]!.reason).toBe("paragraph_not_editable");
+    // even offsets in the cell paragraph's own space refuse: the address is
+    // listed only as a merged view, and ops are authored against the listing
+    const cellLocal = runApply(body(), [
       { op: "replace", ref: "c", author: AUTHOR, addr: "10000002", start: 5, end: 9, expectText: "text", text: "rate" },
     ]);
-    expect(ok.receipts[0]!.status).toBe("applied");
-    expect(verifyOutput(normalizeDocx(docx(body())).docx, ok.out, ok.receipts).ok).toBe(true);
-    expect(openDocument(ok.out).projection().map((p) => p.text)).toEqual(["Deleted headingCell rate."]);
+    expect(cellLocal.receipts[0]!.status).toBe("refused");
+    expect(cellLocal.receipts[0]!.reason).toBe("paragraph_not_editable");
+    expect(openDocument(cellLocal.out).projection().map((p) => p.text)).toEqual(["Deleted headingCell text."]);
+    // once the mark is resolved the cell paragraph is addressable again
+    const plain = runApply(
+      `<w:tbl><w:tr><w:tc>${P("10000002", R("Cell text."))}</w:tc></w:tr></w:tbl>`,
+      [{ op: "replace", ref: "c", author: AUTHOR, addr: "10000002", start: 5, end: 9, expectText: "text", text: "rate" }],
+    );
+    expect(plain.receipts[0]!.status).toBe("applied");
+    expect(verifyOutput(normalizeDocx(docx(`<w:tbl><w:tr><w:tc>${P("10000002", R("Cell text."))}</w:tc></w:tr></w:tbl>`)).docx, plain.out, plain.receipts).ok).toBe(true);
   });
 
   it("the resolver refuses to anchor into a merged record", () => {
@@ -176,14 +185,21 @@ describe("merged records are views, not edit targets", () => {
     expect(ok).toEqual({ ok: true, addr: "10000002", start: 5, end: 9 });
   });
 
-  it("a second-pass insert skips merged records and applies on a normal one", () => {
+  it("inserts refuse merged records and apply on a normal one", () => {
     const listed = openDocument(docx(body(P("10000003", R("Tail paragraph."))))).projection();
     expect(listed.map((p) => p.addr)).toEqual(["10000002", "10000003"]);
     expect(listed[1]!.editable).toBe(true);
+    // the merged record's address refuses
     const ins = runApply(body(), [
       { op: "insertParagraphAfter", ref: "i", author: AUTHOR, addr: "10000002", text: "Inserted." },
     ]);
-    expect(ins.receipts[0]!.status).toBe("applied");
+    expect(ins.receipts[0]!.status).toBe("refused");
+    expect(ins.receipts[0]!.reason).toBe("paragraph_not_editable");
+    // a listed, editable record accepts the insert
+    const ok = runApply(body(P("10000003", R("Tail paragraph."))), [
+      { op: "insertParagraphAfter", ref: "i", author: AUTHOR, addr: "10000003", text: "Inserted." },
+    ]);
+    expect(ok.receipts[0]!.status).toBe("applied");
   });
 });
 
@@ -306,7 +322,7 @@ describe("normalize reports an enforced editing restriction", () => {
   it("normalize never adds or removes the restriction", () => {
     const locked = writePackage(entriesOf(P("10000001", R("Body.")), settings(`<w:documentProtection w:edit="forms" w:enforcement="true"/>`)));
     const { docx: out } = normalizeDocx(locked);
-    expect(new TextDecoder().decode(readPackage(out).get("word/settings.xml")!))
+    expect(new TextDecoder().decode(entryBytes(readPackage(out).get("word/settings.xml")!)))
       .toContain('<w:documentProtection w:edit="forms" w:enforcement="true"/>');
   });
 });

@@ -3,7 +3,7 @@
 // in-memory.
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
+import { encodePart, readPackage, writePackage, entryBytes } from "@stitchdocx/package-io";
 import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt } from "./index.js";
 import { buildSpanMap, checkSpan } from "./spanmap.js";
 import { wordEdits } from "./worddiff.js";
@@ -44,7 +44,7 @@ describe("tracked-change regression tests", () => {
     expect(receipts.every((r) => r.status === "applied")).toBe(true);
     const out1 = doc.save();
     // sibling: no w:ins directly inside another w:ins
-    const xml = new TextDecoder().decode(readPackage(out1).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(out1).get("word/document.xml")!));
     expect(xml).not.toMatch(/<w:ins [^>]*><w:ins /);
     // independent reject of f1 leaves f2's text
     const doc2 = openDocument(out1);
@@ -122,7 +122,7 @@ describe("tracked-change regression tests", () => {
     const body = P("10000001", R("one")) + P("10000001", R("two"));
     const first = normalizeDocx(docx(body));
     expect(first.assigned).toBe(1); // the duplicate reassigned
-    const xml = new TextDecoder().decode(readPackage(first.docx).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(first.docx).get("word/document.xml")!));
     const ids = [...xml.matchAll(/w14:paraId="([0-9A-F]+)"/g)].map((m) => m[1]!);
     expect(new Set(ids).size).toBe(ids.length);
     const second = normalizeDocx(first.docx);
@@ -144,7 +144,7 @@ describe("tracked-change regression tests", () => {
     expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     // tamper: change the revision's author
     const entries = readPackage(out);
-    let xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    let xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
     xml = xml.replace('w:author="Reviewer A [f]"', 'w:author="Other Author"');
     entries.set("word/document.xml", encodePart(xml));
     const tampered = writePackage(entries);
@@ -160,7 +160,7 @@ describe("tracked-change regression tests", () => {
     const text = doc.projection().find((p) => p.addr === "10000001")!.text;
     // offset 16 sits after the first "o" of "on": original text with BBB at 16
     expect(text).toBe("Payments begin oBBB n the start date.");
-    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(xml).not.toContain("Reviewer A");
   });
 
@@ -172,7 +172,7 @@ describe("tracked-change regression tests", () => {
     const doc = openDocument(docx(body));
     const resolved = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
     expect(resolved[0]!.changeIds.sort()).toEqual(["90", "91"]);
-    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(xml).not.toContain("Ours [legacy]");
     expect(xml).toContain("Client Author"); // D3: revisions we never wrote survive
     expect(xml).toContain("gone"); // reject moveFrom restores the text
@@ -188,7 +188,7 @@ describe("tracked-change regression tests", () => {
     // a second decision for the same author resolves nothing further
     const second = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
     expect(second[0]!.changeIds).toEqual([]);
-    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(openDocument(doc.save()).projection()[0]!.text).toBe("stay"); // reject removes the moveTo content
     expect(xml).toContain('<w:jc w:val="right"/>'); // pPrChange reject restores the saved props
     expect(xml).not.toContain("Ours [legacy]");
@@ -212,7 +212,7 @@ describe("tracked-change regression tests", () => {
     const doc = openDocument(norm);
     const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 0, end: 9, expectText: "Rate card", text: "Rates\u0001\r\n2026" }], { date: DATE });
     expect(receipts[0]!.status).toBe("applied");
-    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(xml).not.toContain("\u0001");
     expect(xml).not.toMatch(/\r/);
   });
@@ -307,7 +307,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     // swap the two flags' authors in the output markup
     const entries = readPackage(out);
-    let xml = new TextDecoder().decode(entries.get("word/document.xml")!);
+    let xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
     xml = xml.replace("Reviewer A [a]", "Reviewer A [TMP]").replace("Reviewer A [b]", "Reviewer A [a]").replace("Reviewer A [TMP]", "Reviewer A [b]");
     entries.set("word/document.xml", encodePart(xml));
     expect(verifyOutput(norm, writePackage(entries), receipts).ok).toBe(false);
@@ -326,7 +326,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Ours [legacy]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));
     doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
-    const xml = new TextDecoder().decode(readPackage(doc.save()).get("word/document.xml")!);
+    const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(xml).toContain("<w:i/>");
     expect(xml).not.toContain("<w:b/>");
     expect(xml).not.toContain("Ours [legacy]");

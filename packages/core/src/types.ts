@@ -19,13 +19,17 @@ export type RevisionDecision =
   | { changeIds: string[]; decision: "accept" | "reject" }
   | { author: string; decision: "accept" | "reject" };
 
-/** finalize decision for one author: plain accept/reject, or accept with the
- *  caller's replacement wording */
+/** finalize decision: names the receipt's changeIds, or (legacy) an author.
+ *  Plain accept/reject, or accept with the caller's replacement wording. */
 export interface Decision {
   /** caller's id, echoed on the finalize result */
   ref: string;
-  author: string;
+  /** the revision author — required for author-keyed decisions; derived from
+   *  the revisions when the decision names changeIds instead */
+  author?: string;
   decision: "accept" | "reject";
+  /** the w:id values this decision resolves (from the receipt's changeIds) */
+  changeIds?: string[];
   /** accept-with-caller-wording (adapter-level finalize composition) */
   text?: string;
 }
@@ -70,6 +74,8 @@ export type RefusalReason =
   | "span_crosses_structure"
   | "span_in_field"
   | "span_in_content_control"
+  | "span_in_alternate_content"
+  | "span_in_math"
   | "paragraph_not_editable"
   | "insert_in_plain_text_control";
 

@@ -10,25 +10,38 @@ import {
   kid,
   kids,
   mainPartName,
-  readPackage,
+  openPackage,
+  relatedPart,
   setAttr,
   writePackage,
   parseXml,
   serializeXml,
+  type EntryData,
   type Entries,
   type XElement,
 } from "@stitchdocx/package-io";
 import { walkBody, type BodyWalk } from "./body.js";
-import { acceptAll, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
-import { executeApply, type ApplyDeps } from "./ops.js";
-import { cloneRunPr, isPairedInsertParagraph, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
+import { acceptAll, attrVal, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
+import { buildSpanMap } from "./spanmap.js";
+import { descendantsOf, executeApply, splitAt, type ApplyDeps } from "./ops.js";
+import { cloneRunPr, isPairedInsertParagraph, ParaIdAllocator, renameEl, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun, unwrap } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
+import { NumberingModel, parseNumberingModel } from "./numbering.js";
+import { otherPartRoots, paraIdsAcrossParts } from "./parts.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
 
 /** the parsed document root is an XDoc; kid() works on it identically */
 const treeAsEl = (d: unknown) => d as XElement;
 
+/** RFC 3339 timestamp — the w:date form Word writes */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+export function isIsoDate(value: unknown): value is string {
+  return typeof value === "string" && ISO_DATE.test(value) && !Number.isNaN(Date.parse(value));
+}
+
 export class Document {
+  private reader: ReturnType<typeof openPackage>;
   private entries: Entries;
   private mainPart: string;
   private tree: ReturnType<typeof parseXml>;
@@ -43,9 +56,9 @@ export class Document {
 
   private constructor(bytes: Uint8Array) {
     this.originalBytes = bytes;
-    this.entries = readPackage(bytes);
-    this.mainPart = mainPartName(this.entries);
-    const docXml = this.entries.get(this.mainPart);
+    this.reader = openPackage(bytes);
+    this.mainPart = mainPartName(this.reader);
+    const docXml = this.reader.part(this.mainPart);
     if (!docXml) throw new Error(`${this.mainPart} missing`);
     this.tree = parseXml(decodePart(docXml));
     this.root = kid(treeAsEl(this.tree), "w:document")!;
@@ -56,17 +69,25 @@ export class Document {
       const addr = getAttr(p, "w14:paraId");
       if (addr !== null) this.paraByAddr.set(addr, p);
     }
-    this.ids = new RevisionIdAllocator(this.root);
-    this.paraIds = new ParaIdAllocator(this.walk.paragraphs);
+    // revision ids are unique across every part; seed above the largest id on
+    // any revision-type element anywhere (the main part's tree is already parsed)
+    this.ids = new RevisionIdAllocator([this.root, ...otherPartRoots(this.reader, this.mainPart)]);
+    this.paraIds = new ParaIdAllocator(paraIdsAcrossParts(this.reader, this.mainPart, this.walk.paragraphs));
+    // only the main part comes inflated; everything else stays raw until the
+    // writer needs it or a command reads it
+    this.entries = this.reader.readAll((name) => name === this.mainPart);
   }
 
   static open(bytes: Uint8Array): Document {
     return new Document(bytes);
   }
 
-  /** projection under a view; addresses are w14:paraId (present after normalize) */
+  /** projection under a view; addresses are w14:paraId (present after normalize).
+   *  Numbering labels are computed per call — no counter state survives. */
   projection(view: View = acceptAll): Paragraph[] {
-    return projectParagraphs(this.walk, view).map((p) => this.toPublicParagraph(p));
+    const model = this.numberingModel();
+    const counters = new Map<string, (number | undefined)[]>();
+    return projectParagraphs(this.walk, view).map((p) => this.toPublicParagraph(p, model, counters));
   }
 
   /** raw projection records (engine-internal shape with merged nodes) */
@@ -74,8 +95,8 @@ export class Document {
     return projectParagraphs(this.walk, view);
   }
 
-  private toPublicParagraph(p: ProjectionParagraph): Paragraph {
-    const kind: Paragraph["kind"] = p.container === "cell" ? "cell" : p.numbered ? "listItem" : /(^|[^a-z])heading|title/i.test(p.style ?? "") ? "heading" : "body";
+  private toPublicParagraph(p: ProjectionParagraph, model: NumberingModel, counters: Map<string, (number | undefined)[]>): Paragraph {
+    const kind: Paragraph["kind"] = p.container === "cell" ? "cell" : model.numberedFor(p.node) ? "listItem" : /(^|[^a-z])heading|title/i.test(p.style ?? "") ? "heading" : "body";
     // a record whose text includes content carried across a removed mark (its
     // own or a preceding paragraph's) is a merged VIEW: its offsets span more
     // than the one paragraph an op may edit, so it is not addressable as listed
@@ -89,20 +110,41 @@ export class Document {
     };
     if (p.table) out.table = p.table;
     if (p.style) out.style = p.style;
-    if (p.numbered) out.numbering = this.numberingLabel(p);
+    if (model.numberedFor(p.node)) {
+      const label = model.labelFor(p.node, counters);
+      if (label !== undefined) out.numbering = label;
+    }
     return out;
   }
 
-  private numberingLabel(p: ProjectionParagraph): string | undefined {
+  /** numbering + styles model, read through the package relationships */
+  private numberingModel(): NumberingModel {
     if (!this.numbering) {
-      const numberingXml = this.entries.get("word/numbering.xml");
-      this.numbering = numberingXml ? parseNumbering(decodePart(numberingXml)) : emptyNumbering;
+      const numberingXml = this.partText(relatedPart(this.reader, this.mainPart, "numbering") ?? "word/numbering.xml");
+      const stylesXml = this.partText(relatedPart(this.reader, this.mainPart, "styles") ?? "word/styles.xml");
+      this.numbering = parseNumberingModel(numberingXml, stylesXml);
     }
-    return this.numbering.labelFor(p.node);
+    return this.numbering;
+  }
+
+  private partText(name: string): string | undefined {
+    const bytes = this.reader.part(name);
+    return bytes ? decodePart(bytes) : undefined;
   }
 
   apply(ops: Op[], opts: { date: string }): Receipt[] {
+    if (!isIsoDate(opts.date)) throw new Error(`date must be an ISO 8601 timestamp, got ${JSON.stringify(opts.date)}`);
     this.recordTextCache = null;
+    // the addressable surface is the projection's listing: unlisted addresses
+    // and merged view records refuse before any span check runs
+    const records = projectParagraphs(this.walk, acceptAll);
+    const listed = new Set<Addr>();
+    const editable = new Set<Addr>();
+    for (const rec of records) {
+      if (!rec.addr) continue;
+      listed.add(rec.addr);
+      if (rec.removedMark === null && !rec.carried) editable.add(rec.addr);
+    }
     const deps: ApplyDeps = {
       paraByAddr: this.paraByAddr,
       ids: this.ids,
@@ -112,6 +154,11 @@ export class Document {
       // are pre-existing tracked changes and must refuse, not reposition
       ownedRevisions: new Set<XElement>(),
       recordText: (addr, view) => this.recordText(addr, view),
+      addressable: (addr) => (!listed.has(addr) ? "unlisted" : editable.has(addr) ? "ok" : "merged"),
+      fieldEntry: (para) => {
+        const state = this.walk.fieldStates.get(para);
+        return state ? [...state] : [];
+      },
     };
     const receipts = executeApply(deps, ops);
     if (receipts.some((r) => r.status === "applied")) this.markDirty();
@@ -180,9 +227,13 @@ export class Document {
     if (decision.text === undefined) return 0;
     let touched = 0;
     const byParagraph = new Map<XElement, { ins: XElement[]; dels: XElement[]; markIns: XElement | null }>();
-    for (const rev of allRevisions(this.root)) {
-      const author = getAttr(rev, "w:author");
-      if (author !== decision.author) continue;
+    // a decision names either the receipt's change ids or (legacy) an author
+    const changeIdSet = decision.changeIds ? new Set(decision.changeIds) : null;
+    const matched = [...allRevisions(this.root)].filter((rev) =>
+      changeIdSet ? changeIdSet.has(getAttr(rev, "w:id") ?? "") : getAttr(rev, "w:author") === decision.author,
+    );
+    const author = decision.author ?? (matched[0] ? getAttr(matched[0], "w:author") : null) ?? "";
+    for (const rev of matched) {
       const paragraph = this.paragraphOf(rev);
       if (!paragraph) continue;
       const rec = byParagraph.get(paragraph) ?? { ins: [], dels: [], markIns: null };
@@ -202,7 +253,7 @@ export class Document {
     for (const [para, rec] of byParagraph) {
       if (!rec.markIns) continue;
       const next = para.parent?.children[para.parent.children.indexOf(para) + 1];
-      if (next && next.kind === "el" && next.name === "w:p" && isPairedInsertParagraph(next, decision.author)) {
+      if (next && next.kind === "el" && next.name === "w:p" && isPairedInsertParagraph(next, author)) {
         paired.add(next);
       }
     }
@@ -270,39 +321,64 @@ export class Document {
         // change in any other paragraph is left alone.
         if (paired.has(para)) {
           const pPr = kid(para, "w:pPr");
-          const change = pPr ? kids(pPr).find((c) => c.name === "w:pPrChange" && getAttr(c, "w:author") === decision.author) : undefined;
+          const change = pPr ? kids(pPr).find((c) => c.name === "w:pPrChange" && getAttr(c, "w:author") === author) : undefined;
           if (change && pPr) removeChildEl(pPr, change);
         }
         touched++;
         continue;
       }
-      // replace/delete: the caller's wording replaces the original span
+      // replace/delete: the caller's wording replaces the whole span the op
+      // changed — every deleted segment, the unchanged words between them
+      // included — with the member's text as one run. The span is recovered
+      // from the paragraph itself: rejecting this decision's revisions reads
+      // the original, accepting them reads the replacement, and what remains
+      // after trimming the common head and tail is exactly the region the op
+      // changed.
+      const idSet = new Set(matched.map((rev) => getAttr(rev, "w:id") ?? ""));
+      const rejectThis: View = (rev) => (rev.id !== null && idSet.has(rev.id) ? "reject" : "accept");
+      const originalText = paragraphText(para, rejectThis);
+      const replacedText = paragraphText(para, acceptAll);
+      let start = 0;
+      while (start < originalText.length && start < replacedText.length && originalText[start] === replacedText[start]) start++;
+      let end = originalText.length;
+      let replEnd = replacedText.length;
+      while (end > start && replEnd > start && originalText[end - 1] === replacedText[replEnd - 1]) {
+        end--;
+        replEnd--;
+      }
       for (const ins of rec.ins) {
         const i = para.children.indexOf(ins);
         if (i >= 0) para.children.splice(i, 1);
         else if (ins.parent) removeChildEl(ins.parent, ins);
       }
-      const parent = rec.dels[0]?.parent ?? para;
-      let placed = false;
       for (const del of rec.dels) {
-        if (!placed) {
-          const i = parent.children.indexOf(del);
-          if (i >= 0) {
-            const firstRunInside = (() => {
-              for (const c of del.children) if (c.kind === "el" && c.name === "w:r") return c;
-              return null;
-            })();
-            const rPr = firstRunInside ? cloneRunPr(firstRunInside) : null;
-            const run = makeRun(rPr, textToRunChildren(decision.text!));
-            parent.children.splice(i, 1, run);
-            run.parent = parent;
-            placed = true;
-            continue;
+        for (const d of descendantsOf(del)) if (d.name === "w:delText") renameEl(d, "w:t");
+        unwrap(del);
+      }
+      if (end > start) {
+        // the paragraph now reads exactly `originalText`; strike [start,end)
+        // plainly (the wording is accepted, not tracked) and drop the
+        // member's text in as one run
+        let map = buildSpanMap(para, acceptAll);
+        splitAt(map, start, () => this.ids.take());
+        map = buildSpanMap(para, acceptAll);
+        splitAt(map, end, () => this.ids.take());
+        map = buildSpanMap(para, acceptAll);
+        const covered = map.pieces.filter((pc) => pc.start >= start && pc.end <= end);
+        const runs: XElement[] = [];
+        for (const pc of covered) if (!runs.includes(pc.run)) runs.push(pc.run);
+        if (runs.length > 0 && new Set(runs.map((r) => r.parent)).size === 1) {
+          const parent = runs[0]!.parent!;
+          const firstRunPr = cloneRunPr(runs[0]!);
+          const at = parent.children.indexOf(runs[0]!);
+          for (const r of runs) {
+            const i = parent.children.indexOf(r);
+            if (i >= 0) parent.children.splice(i, 1);
           }
+          const run = makeRun(firstRunPr, textToRunChildren(decision.text!));
+          parent.children.splice(Math.min(at, parent.children.length), 0, run);
+          run.parent = parent;
         }
-        const i = parent.children.indexOf(del);
-        if (i >= 0) parent.children.splice(i, 1);
-        else if (del.parent) removeChildEl(del.parent, del);
       }
       touched++;
     }
@@ -345,72 +421,6 @@ function* allRevisions(root: XElement): Generator<XElement> {
       stack.push(c);
     }
   }
-}
-
-// —————————————————————————————————————————————————————————————— numbering
-
-interface NumLevel {
-  fmt: string;
-  text: string;
-  start: number;
-}
-interface NumberingModel {
-  labelFor(p: XElement): string | undefined;
-}
-const emptyNumbering: NumberingModel = { labelFor: () => undefined };
-
-function parseNumbering(xml: string): NumberingModel {
-  const tree = parseXml(xml);
-  const root = kid(treeAsEl(tree), "w:numbering");
-  if (!root) return emptyNumbering;
-  const abstracts = new Map<string, Map<string, NumLevel>>();
-  for (const a of kids(root, "w:abstractNum")) {
-    const id = getAttr(a, "w:abstractNumId");
-    if (id === null) continue;
-    const levels = new Map<string, NumLevel>();
-    for (const lvl of kids(a, "w:lvl")) {
-      const ilvl = getAttr(lvl, "w:ilvl");
-      if (ilvl === null) continue;
-      const fmt = getAttr(kid(lvl, "w:numFmt") ?? (el("x") as XElement), "w:val") ?? "decimal";
-      const text = getAttr(kid(lvl, "w:lvlText") ?? (el("x") as XElement), "w:val") ?? "";
-      const start = parseInt(getAttr(kid(lvl, "w:start") ?? (el("x") as XElement), "w:val") ?? "1", 10) || 1;
-      levels.set(ilvl, { fmt, text, start });
-    }
-    abstracts.set(id, levels);
-  }
-  const numToAbstract = new Map<string, string>();
-  for (const n of kids(root, "w:num")) {
-    const numId = getAttr(n, "w:numId");
-    const abs = getAttr(kid(n, "w:abstractNumId") ?? (el("x") as XElement), "w:val");
-    if (numId && abs) numToAbstract.set(numId, abs);
-  }
-
-  const counters = new Map<string, number[]>();
-  return {
-    labelFor(p: XElement): string | undefined {
-      const pPr = kid(p, "w:pPr");
-      const numPr = pPr ? kid(pPr, "w:numPr") : undefined;
-      if (!numPr) return undefined;
-      const numId = getAttr(kid(numPr, "w:numId") ?? (el("x") as XElement), "w:val") ?? "0";
-      const ilvl = getAttr(kid(numPr, "w:ilvl") ?? (el("x") as XElement), "w:val") ?? "0";
-      const abs = numToAbstract.get(numId);
-      const levels = abs ? abstracts.get(abs) : undefined;
-      const lvl = levels?.get(ilvl);
-      if (!lvl) return undefined;
-      const key = `${numId}`;
-      const arr = counters.get(key) ?? [];
-      const level = parseInt(ilvl, 10) || 0;
-      arr[level] = (arr[level] ?? lvl.start - 1) + 1;
-      for (let i = level + 1; i < arr.length; i++) arr[i] = lvl.start - 1;
-      counters.set(key, arr);
-      if (lvl.fmt === "bullet" || lvl.fmt === "none") return lvl.fmt === "none" ? "" : lvl.text;
-      return lvl.text.replace(/%\d/g, (m) => {
-        const idx = parseInt(m.slice(1), 10);
-        const v = arr[idx] ?? lvl.start;
-        return String(v);
-      });
-    },
-  };
 }
 
 // —————————————————————————————————————————————————————————————————— public

@@ -1,5 +1,5 @@
 // stitchdocx core — public engine API (see research/04-engine-api-adjudication.md)
-export { openDocument, normalizeDocx, Document } from "./document.js";
+export { openDocument, normalizeDocx, Document, isIsoDate } from "./document.js";
 export { verifyOutput } from "./verify.js";
 export { buildSpanMap, checkSpan } from "./spanmap.js";
 export { resolveSpan } from "./resolve.js";

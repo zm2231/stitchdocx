@@ -44,10 +44,22 @@ resolver and `apply` refuse such spans with `paragraph_not_editable`. The
 underlying paragraphs keep their own addresses and are editable in their own
 coordinates.
 
+Text that Word does not render or will discard is never a valid edit target:
+complex-field instructions are omitted from `text`, field results (including
+`w:fldSimple` content and everything under a TOC's separate) are listed but
+refused with `span_in_field`, and an AlternateContent branch is listed but
+refused with `span_in_alternate_content`. Office math (`m:oMath`) is listed
+but refused with `span_in_math`. Hidden runs (`w:vanish`, `w:specVanish`,
+`w:webHidden`) are not listed at all, and engine insertions never inherit
+hidden formatting. A table row the client tracked as inserted or deleted is
+shown or dropped per Word's accept/reject rules, and spans inside a tracked
+row refuse with `span_overlaps_revision`.
+
 ### `apply <in.docx> <ops.json> <out.docx>`
 
-`ops.json` is `{ "date": "<ISO timestamp stamped on every revision>", "ops": [...] }`.
-Ops (all require `flagId`, `author`, `addr`):
+`ops.json` is `{ "date": "<ISO 8601 timestamp stamped on every revision>",
+"ops": [...] }`; `date` is required and must parse as ISO 8601, and every op
+needs a non-empty `author`. Ops (all require `flagId`, `author`, `addr`):
 
 - `{ "op": "replace", "addr", "start", "end", "expectText", "text", "granularity"? }`
   — track-deletes `[start,end)` and track-inserts `text` after it. With
@@ -65,26 +77,34 @@ Spans are in the paragraph's original text coordinates and must match
 paragraph text and `insertedAddr`.
 
 Refusals carry a machine-readable `reason`: `addr_not_found`,
-`span_out_of_range`, `span_text_mismatch`, `empty_text`,
+`span_out_of_range` (including an offset that would split a surrogate pair),
+`span_text_mismatch`, `empty_text`,
 `span_overlaps_revision`, `span_overlaps_prior_op`, `span_crosses_structure`,
-`span_in_field`, `span_in_content_control`, `paragraph_not_editable`,
+`span_in_field`, `span_in_content_control`, `span_in_alternate_content`,
+`span_in_math`, `paragraph_not_editable`,
 `insert_in_plain_text_control` (a plain-text content control may hold only
 one paragraph).
 
 ### `finalize <in.docx> <decisions.json> <out.docx>`
 
-`decisions.json` is `{ "date"?, "decisions": [{ "flagId", "author",
-"decision": "accept" | "reject", "text"? }] }`. Each decision resolves every
-revision authored by `author` — exactly that author, nothing else; revisions
-by anyone else survive untouched. `"text"` accepts-with-wording: the flagged
-span reads as the original with the given text in place of our revision.
-Output is `{ "results": [{ "flagId", "author", "decision", "resolved" }] }`.
+`decisions.json` is `{ "date"?, "decisions": [{ "flagId", "decision",
+"changeIds"?, "author"?, "text"? }] }`. A decision names the revisions it
+resolves — preferably the receipt's `changeIds`; an `author` alone (legacy)
+resolves every revision authored by exactly that author, and revisions by
+anyone else survive untouched. `changeIds` wins when both are given. A
+decision that matches nothing fails the command. `"text"` accepts-with-
+wording: the whole span the op changed (unchanged words between deleted
+segments included) reads as the given text. Output is
+`{ "results": [{ "flagId", "author", "decision", "resolved" }] }`.
 
 ### `verify <original.docx> <output.docx> <receipts.json>`
 
 Pure receipt check: `receipts.json` is `{ "receipts": [...] }` as produced by
 `apply`. Fails ( `{ "ok": false, "failures": [...] }` ) unless the output is
 the original plus exactly what the receipts claim — every changeId present
-and authored by the receipt's author, rejecting one receipt's revisions yields
-its `before`, accepting them yields its `after`, untouched paragraphs byte-
-identical in text, and only `word/document.xml` differs.
+and authored by the receipt's author, rejecting one receipt's revisions
+yields its `before`, accepting them yields its `after`, untouched paragraphs
+byte-identical in text, every other package entry byte-identical with none
+added or removed, the main part outside paragraphs canonically identical,
+and a touched paragraph carrying nothing beyond the receipt's own revisions
+— and only `word/document.xml` differs.

@@ -7,13 +7,23 @@
 // One walker serves two consumers: paragraphText (projection) and the span
 // map (mutation input), so text and offsets can never disagree.
 import { decodeAttrValue, decodeText, kid, kids, type XElement } from "@stitchdocx/package-io";
-import { walkBody, type BodyContext, type BodyWalk } from "./body.js";
+import { walkBody, rowsOf, cellsOf, rowRevision, type BodyContext, type BodyWalk } from "./body.js";
+import { stepFields } from "./fields.js";
 
 export const REVISION_NAMES = new Set(["w:ins", "w:del", "w:moveFrom", "w:moveTo"]);
 const SKIPPED = new Set(["w:pPr", "w:rPr", "w:instrText", "w:delInstrText"]);
-/** text boxes are not part of the paragraph's text and are never edited; Word
- *  renders mc:Choice, never mc:Fallback */
-const UNSHOWN = new Set(["w:txbxContent", "mc:Fallback"]);
+/** text boxes are not part of the paragraph's text and are never edited;
+ *  AlternateContent branches are picked by mcBranch (the Word-supported
+ *  Choice, else the Fallback) */
+const UNSHOWN = new Set(["w:txbxContent"]);
+
+/** run properties that hide a run from Word's display: hidden text is never
+ *  part of the listed text, and never copied onto inserted runs */
+const HIDDEN_PR = new Set(["w:vanish", "w:specVanish", "w:webHidden"]);
+
+/** namespace prefixes an AlternateContent Choice may require for us to read
+ *  that branch (the prefixes this engine understands) */
+const MC_SUPPORTED = new Set(["w", "w14", "w15"]);
 
 /** decision for a revision element */
 export type View = (rev: { id: string | null; author: string | null; name: string }) => "accept" | "reject";
@@ -25,6 +35,33 @@ const isInsertion = (name: string) => name === "w:ins" || name === "w:moveTo";
 export function attrVal(el: XElement, name: string): string | null {
   const a = el.attrs.find((x) => x.name === name);
   return a ? decodeAttrValue(a.raw) : null;
+}
+
+/** true when the run carries a hide-from-display run property */
+export function runHidden(r: XElement): boolean {
+  const rPr = kid(r, "w:rPr");
+  if (!rPr) return false;
+  return kids(rPr).some((c) => HIDDEN_PR.has(c.name));
+}
+
+/** the AlternateContent branch Word would render: the first Choice whose
+ *  Requires namespaces we understand, else the Fallback */
+export function mcBranch(ac: XElement): XElement | null {
+  for (const choice of kids(ac, "mc:Choice")) {
+    const req = attrVal(choice, "Requires") ?? "";
+    const prefixes = req.trim().split(/\s+/).filter(Boolean);
+    if (prefixes.length > 0 && prefixes.every((p) => MC_SUPPORTED.has(p))) return choice;
+  }
+  return kid(ac, "mc:Fallback") ?? null;
+}
+
+/** the one character a w:sym contributes: the code point named by w:char */
+export function symChar(el: XElement): string | null {
+  let raw = attrVal(el, "w:char");
+  if (raw === null) return null;
+  raw = raw.replace(/^0[xX]/, "");
+  const n = parseInt(raw, 16);
+  return Number.isInteger(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : null;
 }
 
 export function visibleRev(rev: XElement, view: View): boolean {
@@ -53,82 +90,112 @@ export function wordText(el: XElement): string {
   return v.replace(/[\t\r\n]/g, " ");
 }
 
-export type CharKind = "text" | "tab" | "break" | "hyphen";
+export type CharKind = "text" | "tab" | "break" | "hyphen" | "sym";
 
 export interface WalkCallbacks {
-  onCharEl?: (el: XElement, kind: CharKind, inFieldResult: boolean) => void;
+  onCharEl?: (el: XElement, kind: CharKind, inFieldResult: boolean, locked: boolean) => void;
 }
 
 /**
  * Walk a paragraph's content exactly like the reader's paragraphText: skip
  * pPr/rPr/instrText/delInstrText entirely, descend revisions with their
- * visibility, track complex fields (begin/separate/end — the reader's
- * "instr anywhere on the field stack hides text" quirk included), and report
- * visible char elements in document order.
+ * visibility, thread the complex-field cursor (begin/separate/end may sit in
+ * different paragraphs — pass the shared cursor in), hide hidden runs, read
+ * w:sym as one character, treat w:fldSimple content as a field result, pick
+ * the Word-supported AlternateContent branch (whose content is listed but
+ * locked), and report visible char elements in document order.
  */
-export function walkContent(p: XElement, view: View, cb: WalkCallbacks): void {
-  visitKids(p, true);
+export function walkContent(p: XElement, view: View, cb: WalkCallbacks, fields: string[] = []): void {
+  visitKids(p, true, fields, false);
 
-  function visitKids(node: XElement, shown: boolean, fields: string[] = []): void {
+  function visitKids(node: XElement, shown: boolean, fields: string[], locked: boolean): void {
     for (const c of node.children) {
       if (c.kind !== "el") continue;
-      visit(c, shown, fields);
+      visit(c, shown, fields, locked);
     }
   }
 
-  function visit(c: XElement, shown: boolean, fields: string[]): void {
+  function visit(c: XElement, shown: boolean, fields: string[], locked: boolean): void {
     if (SKIPPED.has(c.name)) return;
     if (UNSHOWN.has(c.name)) return;
     if (REVISION_NAMES.has(c.name)) {
       const s = shown && visibleRev(c, view);
-      for (const cc of c.children) if (cc.kind === "el") visit(cc, s, fields);
+      for (const cc of c.children) if (cc.kind === "el") visit(cc, s, fields, locked);
       return;
     }
     if (c.name === "w:fldChar") {
-      const v = attrVal(c, "w:fldCharType");
-      if (v === "begin") fields.push("instr");
-      else if (v === "separate") {
-        if (fields.length) fields[fields.length - 1] = "result";
-      } else if (v === "end") fields.pop();
+      stepFields(fields, c);
+      return;
+    }
+    if (c.name === "w:fldSimple") {
+      // the content of a simple field is a field result: shown, but never
+      // edit-safe (Word discards the edit on the next field update)
+      fields.push("result");
+      visitKids(c, shown, fields, locked);
+      fields.pop();
       return;
     }
     const inInstr = fields.includes("instr");
+    if (c.name === "w:r") {
+      if (runHidden(c)) return;
+      visitKids(c, shown, fields, locked);
+      return;
+    }
+    if (c.name === "w:sym") {
+      if (shown && !inInstr) cb.onCharEl?.(c, "sym", fields.length > 0, locked);
+      return;
+    }
+    if (c.name === "m:oMath" || c.name === "m:oMathPara") {
+      // office math is listed but locked: the engine cannot re-write it
+      visitKids(c, shown, fields, true);
+      return;
+    }
+    if (c.name === "m:t") {
+      if (shown && !inInstr) cb.onCharEl?.(c, "text", fields.length > 0, true);
+      return;
+    }
+    if (c.name === "mc:AlternateContent") {
+      const branch = mcBranch(c);
+      if (branch) visitKids(branch, shown, fields, true);
+      return;
+    }
     if (c.name === "w:t" || c.name === "w:delText") {
-      if (shown && !inInstr) cb.onCharEl?.(c, "text", fields.length > 0);
+      if (shown && !inInstr) cb.onCharEl?.(c, "text", fields.length > 0, locked);
       return;
     }
     if (c.name === "w:tab" || c.name === "w:ptab") {
-      if (shown && !inInstr) cb.onCharEl?.(c, "tab", fields.length > 0);
+      if (shown && !inInstr) cb.onCharEl?.(c, "tab", fields.length > 0, locked);
       return;
     }
     if (c.name === "w:br" || c.name === "w:cr") {
-      if (shown && !inInstr) cb.onCharEl?.(c, "break", fields.length > 0);
+      if (shown && !inInstr) cb.onCharEl?.(c, "break", fields.length > 0, locked);
       return;
     }
     if (c.name === "w:noBreakHyphen") {
-      if (shown && !inInstr) cb.onCharEl?.(c, "hyphen", fields.length > 0);
+      if (shown && !inInstr) cb.onCharEl?.(c, "hyphen", fields.length > 0, locked);
       return;
     }
     if (c.name === "w:sdt") {
       const content = kid(c, "w:sdtContent");
-      if (content) visitKids(content, shown, fields);
-      else visitKids(c, shown, fields);
+      if (content) visitKids(content, shown, fields, locked);
+      else visitKids(c, shown, fields, locked);
       return;
     }
-    visitKids(c, shown, fields);
+    visitKids(c, shown, fields, locked);
   }
 }
 
-export function paragraphText(p: XElement, view: View): string {
+export function paragraphText(p: XElement, view: View, fields: string[] = []): string {
   let out = "";
   walkContent(p, view, {
     onCharEl: (el, kind) => {
       if (kind === "text") out += wordText(el);
+      else if (kind === "sym") out += symChar(el) ?? "";
       else if (kind === "tab") out += "\t";
       else if (kind === "break") out += "\n";
       else out += "-";
     },
-  });
+  }, fields);
   return out;
 }
 
@@ -185,6 +252,9 @@ export function paragraphProps(p: XElement): { style: string | null; numbered: b
 export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagraph[] {
   const out: ProjectionParagraph[] = [];
   let tableIndex = -1;
+  // the complex-field cursor is threaded through the whole story: a TOC's
+  // begin/end fldChars sit in different paragraphs
+  const fields: string[] = [];
 
   /** returns the container's trailing removed-mark paragraph, if any */
   const visit = (node: XElement, ctx: BodyContext, carry: ProjectionParagraph | null = null): ProjectionParagraph | null => {
@@ -199,7 +269,7 @@ export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagra
           table: ctx.table ?? null,
           inContentControl: ctx.sdt,
           ...props,
-          text: (pending?.text ?? "") + paragraphText(c, view),
+          text: (pending?.text ?? "") + paragraphText(c, view, fields),
           removedMark: null,
           carried: pending !== null,
           merged: pending ? [...pending.merged, pending.node] : [],
@@ -215,15 +285,27 @@ export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagra
         }
       } else if (c.name === "w:tbl") {
         const t = ctx.table ? ctx.table : { index: ++tableIndex };
-        kids(c, "w:tr").forEach((tr, r) => {
-          kids(tr, "w:tc").forEach((tc, col) => {
+        let r = 0;
+        for (const tr of rowsOf(c)) {
+          // row-level tracked changes are applied to the view the way Word
+          // applies them: a deleted row disappears under accept, an inserted
+          // row under reject
+          const rev = rowRevision(tr);
+          if (rev && !visibleRev(rev, view)) {
+            r++;
+            continue;
+          }
+          let col = 0;
+          for (const tc of cellsOf(tr)) {
             // a removed mark before the table merges into the first cell's
             // first paragraph; only that cell receives the carry
             const left = visit(tc, { ...ctx, cell: true, table: { index: t.index, row: r, col } }, pending);
             pending = null;
             if (left && !(left.removedMark === "w:del" && left.text === "")) out.push(left);
-          });
-        });
+            col++;
+          }
+          r++;
+        }
       } else if (c.name === "w:sdt") {
         const content = kid(c, "w:sdtContent");
         if (content) {
