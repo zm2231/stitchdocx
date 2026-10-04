@@ -24,8 +24,9 @@ import { walkBody, type BodyWalk } from "./body.js";
 import { acceptAll, attrVal, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
 import { buildSpanMap } from "./spanmap.js";
 import { executeApply, splitAt, type ApplyDeps } from "./ops.js";
-import { cloneRunPr, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
+import { ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
+import { StyleSheet } from "./styles.js";
 import { NumberingModel, parseNumberingModel } from "./numbering.js";
 import { otherPartRoots, paraIdsAcrossParts } from "./parts.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt } from "./types.js";
@@ -53,6 +54,7 @@ export class Document {
   private originalBytes: Uint8Array;
   private dirty = false;
   private numbering?: NumberingModel;
+  readonly styles: StyleSheet;
 
   private constructor(bytes: Uint8Array) {
     this.originalBytes = bytes;
@@ -64,6 +66,7 @@ export class Document {
     this.root = kid(treeAsEl(this.tree), "w:document")!;
     if (!this.root) throw new Error("word/document.xml has no w:document root");
     this.walk = walkBody(this.root);
+    this.styles = StyleSheet.parse(this.partText(relatedPart(this.reader, this.mainPart, "styles") ?? "word/styles.xml"));
     this.paraByAddr = new Map();
     for (const p of this.walk.paragraphs) {
       const addr = getAttr(p, "w14:paraId");
@@ -87,12 +90,12 @@ export class Document {
   projection(view: View = acceptAll): Paragraph[] {
     const model = this.numberingModel();
     const counters = new Map<string, (number | undefined)[]>();
-    return projectParagraphs(this.walk, view).map((p) => this.toPublicParagraph(p, model, counters));
+    return projectParagraphs(this.walk, view, this.styles).map((p) => this.toPublicParagraph(p, model, counters));
   }
 
   /** raw projection records (engine-internal shape with merged nodes) */
   projectionRecords(view: View = acceptAll): ProjectionParagraph[] {
-    return projectParagraphs(this.walk, view);
+    return projectParagraphs(this.walk, view, this.styles);
   }
 
   private toPublicParagraph(p: ProjectionParagraph, model: NumberingModel, counters: Map<string, (number | undefined)[]>): Paragraph {
@@ -137,7 +140,7 @@ export class Document {
     this.recordTextCache = null;
     // the addressable surface is the projection's listing: unlisted addresses
     // and merged view records refuse before any span check runs
-    const records = projectParagraphs(this.walk, acceptAll);
+    const records = projectParagraphs(this.walk, acceptAll, this.styles);
     const listed = new Set<Addr>();
     const editable = new Set<Addr>();
     for (const rec of records) {
@@ -155,6 +158,7 @@ export class Document {
       ownedRevisions: new Set<XElement>(),
       recordText: (addr, view) => this.recordText(addr, view),
       addressable: (addr) => (!listed.has(addr) ? "unlisted" : editable.has(addr) ? "ok" : "merged"),
+      styles: this.styles,
       fieldEntry: (para) => {
         const state = this.walk.fieldStates.get(para);
         return state ? [...state] : [];
@@ -174,12 +178,12 @@ export class Document {
     if (view === acceptAll) {
       if (this.recordTextCache === null) {
         const byAddr = new Map<Addr, string>();
-        for (const rec of projectParagraphs(this.walk, view)) if (rec.addr) byAddr.set(rec.addr, rec.text);
+        for (const rec of projectParagraphs(this.walk, view, this.styles)) if (rec.addr) byAddr.set(rec.addr, rec.text);
         this.recordTextCache = { view, byAddr };
       }
       return this.recordTextCache.byAddr.get(addr) ?? null;
     }
-    for (const rec of projectParagraphs(this.walk, view)) if (rec.addr === addr) return rec.text;
+    for (const rec of projectParagraphs(this.walk, view, this.styles)) if (rec.addr === addr) return rec.text;
     return null;
   }
 
@@ -258,7 +262,7 @@ export class Document {
     // rejected: a deletion covers its characters, an insertion is a point
     const ids = new Set([...matched].map((m) => getAttr(m, "w:id")));
     const showOurs: View = (rev) => (ids.has(rev.id) && (rev.name === "w:del" || rev.name === "w:moveFrom") ? "reject" : "accept");
-    const shown = buildSpanMap(para, showOurs);
+    const shown = buildSpanMap(para, showOurs, this.styles);
     let pos = 0;
     let lo = Infinity;
     let hi = -Infinity;
@@ -280,7 +284,7 @@ export class Document {
 
     resolveRevisions(this.root, (rev) => matched.has(rev), "reject");
 
-    const text = paragraphText(para, acceptAll);
+    const text = paragraphText(para, acceptAll, this.styles);
     const want = d.expectText;
     const starts: number[] = [];
     for (let at = text.indexOf(want); at >= 0; at = text.indexOf(want, at + 1)) {
@@ -296,9 +300,9 @@ export class Document {
    *  carrying the formatting of the span's first run */
   private replacePlain(para: XElement, start: number, end: number, text: string, index: number, ref: string): void {
     const take = () => this.ids.take();
-    splitAt(buildSpanMap(para, acceptAll), start, take);
-    splitAt(buildSpanMap(para, acceptAll), end, take);
-    const map = buildSpanMap(para, acceptAll);
+    splitAt(buildSpanMap(para, acceptAll, this.styles), start, take);
+    splitAt(buildSpanMap(para, acceptAll, this.styles), end, take);
+    const map = buildSpanMap(para, acceptAll, this.styles);
     const inside = (pc: (typeof map.pieces)[number]) =>
       pc.end > pc.start ? pc.start >= start && pc.end <= end : pc.start > start && pc.start < end;
     const runs: XElement[] = [];
@@ -310,7 +314,7 @@ export class Document {
     if (runs.length === 0) throw new Error(`decision ${index} (${ref}): the flagged span holds no runs`);
     const parent = runs[0]!.parent!;
     const at = parent.children.indexOf(runs[0]!);
-    const rPr = cloneRunPr(runs[0]!);
+    const rPr = this.styles.insertedRunPr(runs[0]!, para);
     for (const r of runs) parent.children.splice(parent.children.indexOf(r), 1);
     if (text === "") return;
     const run = makeRun(rPr, textToRunChildren(text));
@@ -324,7 +328,7 @@ export class Document {
     const first = ins[0]!;
     const parent = first.parent!;
     const at = parent.children.indexOf(first);
-    const runPr = cloneRunPr(kid(first, "w:r") ?? null);
+    const runPr = this.styles.insertedRunPr(kid(first, "w:r") ?? null, this.paragraphOf(first)!);
     for (const i of ins) if (i.parent) removeChildEl(i.parent, i);
     const run = makeRun(runPr, textToRunChildren(text));
     parent.children.splice(Math.min(at, parent.children.length), 0, run);

@@ -8,6 +8,7 @@ import { normalizeDocx, openDocument, verifyOutput, type Op, type Receipt } from
 import { buildSpanMap, checkSpan } from "./spanmap.js";
 import { wordEdits } from "./worddiff.js";
 import { paragraphText } from "./projection.js";
+import { StyleSheet } from "./styles.js";
 
 const DATE = "2026-10-03T00:00:00Z";
 
@@ -67,7 +68,7 @@ describe("tracked-change regression tests", () => {
     const doc = openDocument(norm);
     const para = doc.projectionRecords()[0]!;
     expect(para.text).toBe("See the portal for details.");
-    const map = buildSpanMap(para.node, () => "accept");
+    const map = buildSpanMap(para.node, () => "accept", StyleSheet.empty);
     // span crosses from plain text into the hyperlink's field result
     const issue = checkSpan(map, 4, 16, []);
     expect(issue?.reason).toBe("span_crosses_structure");
@@ -80,7 +81,7 @@ describe("tracked-change regression tests", () => {
     const doc = openDocument(norm);
     const para = doc.projectionRecords()[0]!;
     expect(para.text).toBe("abcd");
-    const map = buildSpanMap(para.node, () => "accept");
+    const map = buildSpanMap(para.node, () => "accept", StyleSheet.empty);
     const issue = checkSpan(map, 1, 3, []); // covers "b" (inside customXml) + "c" (outside)
     expect(issue?.reason).toBe("span_crosses_structure");
     const before = doc.save();
@@ -233,7 +234,7 @@ describe("tracked-change regression tests", () => {
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     const para = doc.projectionRecords()[0]!;
-    const map = buildSpanMap(para.node, () => "accept");
+    const map = buildSpanMap(para.node, () => "accept", StyleSheet.empty);
     const at = para.text.indexOf("October 3") + 2;
     const issue = checkSpan(map, at, at, []);
     expect(issue?.reason).toBe("span_in_field");
@@ -246,7 +247,7 @@ describe("tracked-change regression tests", () => {
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     const para = doc.projectionRecords()[0]!;
-    const map = buildSpanMap(para.node, () => "accept");
+    const map = buildSpanMap(para.node, () => "accept", StyleSheet.empty);
     const at = para.text.indexOf("October 1") + 2;
     const issue = checkSpan(map, at, at, []);
     expect(issue?.reason).toBe("span_in_content_control");
@@ -259,7 +260,7 @@ describe("tracked-change regression tests", () => {
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
     const para = doc.projectionRecords()[0]!;
-    const map = buildSpanMap(para.node, () => "accept");
+    const map = buildSpanMap(para.node, () => "accept", StyleSheet.empty);
     // an op whose author string matches the pre-existing revision's author
     const issue = checkSpan(map, 15, 15, [{ start: 0, end: 0 }], new Set());
     // ownedRevisions is empty at validation: nothing from this call exists yet
@@ -278,7 +279,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       R(" tail") + `</w:p>`;
     const doc = openDocument(docx(body));
     const rec = doc.projectionRecords()[0]!;
-    const text = paragraphText(rec.node, (rev) => (rev.author === "Reviewer A [f]" ? "reject" : "accept"));
+    const text = paragraphText(rec.node, (rev) => (rev.author === "Reviewer A [f]" ? "reject" : "accept"), StyleSheet.empty);
     expect(text).toBe(" tail"); // the wrapped-author insertion is recognized and rejected
   });
 

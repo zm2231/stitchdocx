@@ -13,7 +13,6 @@ import {
 import { buildSpanMap, checkSpan, pieceAt, type SpanMap } from "./spanmap.js";
 import { attrVal, markRevision, paragraphText, textContent, wordText, type View } from "./projection.js";
 import {
-  cloneRunPr,
   makeRun,
   newRevisionEl,
   renameEl,
@@ -24,6 +23,7 @@ import {
   textToRunChildren,
 } from "./revisions.js";
 import { wordEdits } from "./worddiff.js";
+import type { StyleSheet } from "./styles.js";
 import type { Addr, Op, Receipt } from "./types.js";
 
 export interface ApplyDeps {
@@ -46,6 +46,7 @@ export interface ApplyDeps {
   /** the paragraph's complex-field cursor state at entry (shared with the
    *  whole-story walk); callers receive a fresh copy */
   fieldEntry(para: XElement): string[];
+  styles: StyleSheet;
 }
 
 const acceptAllView: View = () => "accept";
@@ -197,16 +198,16 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
         ...base,
         changeIds,
         insertedAddr,
-        before: paragraphText(para, acceptAllView),
-        after: paragraphText(deps.paraByAddr.get(insertedAddr) ?? para, acceptAllView),
+        before: paragraphText(para, acceptAllView, deps.styles),
+        after: paragraphText(deps.paraByAddr.get(insertedAddr) ?? para, acceptAllView, deps.styles),
       };
     }
     const rejectMine: View = (rev) => (rev.id !== null && changeIds.includes(rev.id) ? "reject" : "accept");
     return {
       ...base,
       changeIds,
-      before: deps.recordText(plan.op.addr, rejectMine) ?? paragraphText(para, rejectMine),
-      after: deps.recordText(plan.op.addr, acceptAllView) ?? paragraphText(para, acceptAllView),
+      before: deps.recordText(plan.op.addr, rejectMine) ?? paragraphText(para, rejectMine, deps.styles),
+      after: deps.recordText(plan.op.addr, acceptAllView) ?? paragraphText(para, acceptAllView, deps.styles),
     };
   });
 }
@@ -220,7 +221,7 @@ function getMap(maps: Map<Addr, SpanMap>, para: XElement, deps: ApplyDeps): Span
   const addr = paraAddr(para);
   let map = addr ? maps.get(addr) : undefined;
   if (!map) {
-    map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
+    map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
     if (addr) maps.set(addr, map);
   }
   return map;
@@ -283,7 +284,7 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
         ids.push(...applyDeletion(deps, para, op.start + e.delStart, op.start + e.delEnd, op.author).ids);
       }
       if (e.insAt !== undefined && e.insText) {
-        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author, null));
+        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author));
       }
     }
     return ids;
@@ -296,7 +297,7 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
     return [...del.ids, insId];
   }
   // pure insertion (empty span)
-  return [applyPointInsertion(deps, para, op.start, op.text, op.author, null)];
+  return [applyPointInsertion(deps, para, op.start, op.text, op.author)];
 }
 
 interface DeletionResult {
@@ -310,11 +311,11 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   // rebuild the map after each split: splitting changes the tree (text is
   // preserved, so offsets stay valid), and stale piece references would
   // split already-split runs and corrupt the paragraph
-  let map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
+  let map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   splitAt(map, start, () => deps.ids.take());
-  map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
+  map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   splitAt(map, end, () => deps.ids.take());
-  map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
+  map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   const covered = map.pieces.filter((pc) => pc.start >= start && pc.end <= end);
   const runs: XElement[] = [];
   for (const pc of covered) if (!runs.includes(pc.run)) runs.push(pc.run);
@@ -324,7 +325,7 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   if (new Set(runs.map((r) => r.parent)).size > 1) {
     throw new Error("mutation safety: covered runs span multiple parents");
   }
-  const firstRunPr = cloneRunPr(runs[0]!);
+  const firstRunPr = deps.styles.insertedRunPr(runs[0]!, para);
 
   // contiguous sibling segments (bookmark/comment markers between runs split
   // the deletion into several w:del elements; everything shares one parent —
@@ -385,15 +386,15 @@ function insertInsEl(deps: ApplyDeps, afterEl: XElement, text: string, author: s
 }
 
 /** point insertion at a text offset (word-diff insertions, empty-span replace) */
-function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string, rPr: XElement | null): string {
+function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string): string {
   const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
-  const run = makeRun(rPr, textToRunChildren(text));
+  const run = makeRun(deps.styles.insertedRunPr(null, para), textToRunChildren(text));
   ins.children.push(run);
   run.parent = ins;
   // ensure no run straddles the insertion point, then place the ins between runs
-  let map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
+  let map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   splitAt(map, at, () => deps.ids.take());
-  map = buildSpanMap(para, acceptAllView, deps.fieldEntry(para));
+  map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   const pc = pieceAt(map, at);
   let parent: XElement;
   let index: number;
@@ -518,7 +519,7 @@ function applyInsertParagraph(
 
   const runId = ids[ids.length - 1]!;
   const runIns = newRevisionEl("w:ins", runId, author, deps.date);
-  const anchorRunPr = cloneRunPr(firstRun(anchor));
+  const anchorRunPr = deps.styles.insertedRunPr(firstRun(anchor), p);
   const run = makeRun(anchorRunPr, textToRunChildren(op.text));
   runIns.children.push(run);
   run.parent = runIns;
@@ -596,7 +597,7 @@ function splitBefore(run: XElement, el_: XElement, takeId: () => string): void {
   const parent = run.parent;
   if (!parent) return;
   const idx = run.children.indexOf(el_);
-  if (idx <= 0) return;
+  if (idx <= (runPrOf(run) ? 1 : 0)) return;
   const leftRun = cloneNode(run);
   leftRun.children = run.children.slice(0, idx);
   rightTo(run, parent, idx, leftRun, takeId);

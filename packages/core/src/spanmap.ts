@@ -6,6 +6,7 @@
 // projection and the contract's offsets live in.
 import { kid, kids, type XElement } from "@stitchdocx/package-io";
 import { walkContent, wordText, symChar, type CharKind, type View } from "./projection.js";
+import type { StyleSheet } from "./styles.js";
 
 export type LockKind = "alternate" | "math";
 
@@ -39,11 +40,11 @@ export interface SpanMap {
   runInfo: Map<XElement, RunInfo>;
 }
 
-export function buildSpanMap(p: XElement, view: View, fields: string[] = []): SpanMap {
+export function buildSpanMap(p: XElement, view: View, styles: StyleSheet, fields: string[] = []): SpanMap {
   const pieces: SpanPiece[] = [];
   const runInfo = new Map<XElement, RunInfo>();
   let pos = 0;
-  walkContent(p, view, {
+  walkContent(p, view, styles, {
     onCharEl: (el, kind, inFieldResult, locked) => {
       const run = el.parent;
       if (!run || run.kind !== "el") return;
@@ -61,7 +62,7 @@ export function buildSpanMap(p: XElement, view: View, fields: string[] = []): Sp
         end: pos + len,
         decoded,
         inFieldResult,
-        lock: locked ? (el.name === "m:t" ? "math" : el.name === "w:sym" && lockedInside(p, el) ? "math" : "alternate") : null,
+        lock: locked ? (el.name === "m:t" ? "math" : (el.name === "w:sym" || el.name === "w16se:symEx") && lockedInside(p, el) ? "math" : "alternate") : null,
       });
       pos += len;
     },

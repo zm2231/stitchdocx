@@ -448,9 +448,19 @@ describe("AlternateContent branches and office math are listed but locked (F17, 
     ]);
   });
 
+  it("a Choice requiring wps is the branch Word renders", () => {
+    const body = P("10000001", R("Fee ") + `<mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>shape</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>picture</w:t></w:r></mc:Fallback></mc:AlternateContent>`);
+    expect(openDocument(docx(body)).projection().map((p) => p.text)).toEqual(["Fee shape"]);
+  });
+
+  it("a w16se:symEx reads as its character", () => {
+    const body = P("10000001", R("Rate ") + `<w:r><mc:AlternateContent><mc:Choice Requires="w16se"><w16se:symEx xmlns:w16se="http://schemas.microsoft.com/office/word/2015/wordml/symex" w16se:font="Segoe UI Emoji" w16se:char="1F600"/></mc:Choice><mc:Fallback><w:t>?</w:t></mc:Fallback></mc:AlternateContent></w:r>` + R(" applies."));
+    expect(openDocument(docx(body)).projection().map((p) => p.text)).toEqual(["Rate \u{1F600} applies."]);
+  });
+
   it("an unsupported Requires falls back, and math text lists locked", () => {
     const body =
-      P("10000001", R("Fee ") + `<mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>shape</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>picture</w:t></w:r></mc:Fallback></mc:AlternateContent>` + R(" and ") + `<m:oMath><m:r><m:t>E=mc^2</m:t></m:r></m:oMath>`) + P("10000002", R("End"));
+      P("10000001", R("Fee ") + `<mc:AlternateContent><mc:Choice Requires="xyz"><w:r><w:t>shape</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>picture</w:t></w:r></mc:Fallback></mc:AlternateContent>` + R(" and ") + `<m:oMath><m:r><m:t>E=mc^2</m:t></m:r></m:oMath>`) + P("10000002", R("End"));
     const doc = openDocument(docx(body));
     expect(doc.projection().map((p) => p.text)).toEqual(["Fee picture and E=mc^2", "End"]);
     const { receipts } = runApply(body, [
@@ -461,6 +471,79 @@ describe("AlternateContent branches and office math are listed but locked (F17, 
       "m1:refused/span_crosses_structure",
       "m2:applied",
     ]);
+  });
+});
+
+describe("hidden text follows Word's style rules (R4)", () => {
+  const cs = (id: string, based: string, rPr: string) => `<w:style w:type="character" w:styleId="${id}"><w:name w:val="${id}"/>${based ? `<w:basedOn w:val="${based}"/>` : ""}<w:rPr>${rPr}</w:rPr></w:style>`;
+  const ps = (id: string, based: string, rPr: string, def = false) => `<w:style w:type="paragraph"${def ? ' w:default="1"' : ""} w:styleId="${id}"><w:name w:val="${id}"/>${based ? `<w:basedOn w:val="${based}"/>` : ""}<w:rPr>${rPr}</w:rPr></w:style>`;
+  const V = "<w:vanish/>";
+  const V0 = '<w:vanish w:val="0"/>';
+  const styles = (inner: string, defaults = "") =>
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${defaults}${inner}</w:styles>`;
+  const run = (text: string, rPr = "") => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ""}<w:t xml:space="preserve">${text}</w:t></w:r>`;
+  const rs = (id: string) => `<w:rStyle w:val="${id}"/>`;
+  const pst = (id: string) => `<w:pStyle w:val="${id}"/>`;
+
+  // expected values are Word's (font.hidden and a PDF render of the same document)
+  it("resolves direct, character style, paragraph style and docDefaults as Word does", () => {
+    const sheet = styles(
+      ps("Normal", "", "", true) + cs("CV", "", V) + cs("CV2", "CV", "") + cs("CV3", "CV", V) + cs("CV0", "CV", V0) +
+        ps("PV", "", V) + ps("PV2", "PV", "") + ps("PV3", "PV", V) + ps("PV0", "PV", V0),
+    );
+    const cases: Array<[string, string, string, boolean]> = [
+      ["", rs("CV"), "a01", true], ["", rs("CV2"), "a02", true], ["", rs("CV3"), "a03", true], ["", rs("CV0"), "a04", false],
+      [pst("PV"), "", "a05", true], [pst("PV2"), "", "a06", true], [pst("PV3"), "", "a07", true], [pst("PV0"), "", "a08", false],
+      [pst("PV"), rs("CV"), "a09", false], [pst("PV"), V0, "a10", false], [pst("PV"), rs("CV0"), "a11", true],
+      ["", rs("CV") + V, "a12", true], ["", rs("CV") + V0, "a13", false], [pst("PV"), V, "a14", true], ["", "", "a15", false],
+      [pst("PV3"), rs("CV"), "a16", false], ["", "<w:specVanish/>", "a17", false], ["", "<w:webHidden/>", "a18", false],
+    ];
+    const body = cases.map(([pPr, rPr, t], i) => P(String(10000001 + i), run(`${t} `, rPr) + run("x", V0), pPr)).join("");
+    const listed = openDocument(docx(body, { "word/styles.xml": sheet })).projection().map((p) => p.text);
+    expect(listed).toEqual(cases.map(([, , t, hidden]) => (hidden ? "x" : `${t} x`)));
+  });
+
+  it("uses the default paragraph style and docDefaults", () => {
+    const b = styles(ps("Normal", "", V, true) + ps("Other", "", "") + ps("Based", "Normal", "") + cs("CV", "", V));
+    const bBody = P("10000001", run("b01 ") + run("x")) + P("10000002", run("b02 ") + run("x"), pst("Other")) +
+      P("10000003", run("b03 ") + run("x"), pst("Based")) + P("10000004", run("b04 ", rs("CV")) + run("x", V0)) +
+      P("10000005", run("b05 ") + run("x", V0), pst("Missing"));
+    expect(openDocument(docx(bBody, { "word/styles.xml": b })).projection().map((p) => p.text)).toEqual(["", "b02 x", "", "b04 x", "x"]);
+    const c = styles(ps("Normal", "", "", true) + ps("PV", "", V) + cs("CV", "", V) + ps("P0", "", V0), `<w:docDefaults><w:rPrDefault><w:rPr>${V}</w:rPr></w:rPrDefault></w:docDefaults>`);
+    const cBody = P("10000001", run("c01 ") + run("x", V0)) + P("10000002", run("c02 ") + run("x", V0), pst("PV")) +
+      P("10000003", run("c03 ", rs("CV")) + run("x", V0)) + P("10000004", run("c04 ") + run("x"), pst("P0")) + P("10000005", run("c05 ", V0));
+    expect(openDocument(docx(cBody, { "word/styles.xml": c })).projection().map((p) => p.text)).toEqual(["x", "x", "x", "c04 x", "c05 "]);
+  });
+
+  it("our insertions stay visible where the styles would hide them, and verify checks it", () => {
+    const sheet = styles(ps("Normal", "", "", true) + cs("CV", "", V));
+    const body = P("10000001", run("Fee is due.", rs("CV") + V0)) + P("10000002", run("End"));
+    const { norm, out, receipts } = runApply(body, [
+      { op: "replace", ref: "r", author: AUTHOR, addr: "10000001", start: 7, end: 10, expectText: "due", text: "owed" },
+      { op: "insertParagraphAfter", ref: "i", author: AUTHOR, addr: "10000001", text: "New clause." },
+    ], { "word/styles.xml": sheet });
+    expect(receipts.map((r) => r.status)).toEqual(["applied", "applied"]);
+    expect(openDocument(out).projection().map((p) => p.text)).toEqual(["Fee is owed.", "New clause.", "End"]);
+    expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    const entries = readPackage(out);
+    const xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
+    const stripped = xml.replace(/(<w:ins [^>]*w:author="Reviewer A"[^>]*><w:r><w:rPr>(?:(?!<\/w:rPr>).)*?)<w:vanish w:val="0"(?:\/>|><\/w:vanish>)/g, "$1");
+    expect(stripped).not.toBe(xml);
+    entries.set("word/document.xml", encodePart(stripped));
+    const tampered = verifyOutput(norm, writePackage(entries), receipts);
+    expect(tampered.ok).toBe(false);
+    expect(tampered.failures.join(" ")).toMatch(/inserts hidden text/);
+  });
+});
+
+describe("a span ending where a formatted run begins splits nothing", () => {
+  it("leaves no empty run behind", () => {
+    const body = P("10000001", R("Fee is due ") + `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">now.</w:t></w:r>`);
+    const { out, receipts } = runApply(body, [{ op: "replace", ref: "r", author: AUTHOR, addr: "10000001", start: 7, end: 11, expectText: "due ", text: "owed " }]);
+    expect(receipts[0]!.status).toBe("applied");
+    const xml = new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
+    expect(xml.match(/<w:b\/>/g)).toHaveLength(1);
+    expect(xml).not.toMatch(/<w:r><w:rPr><w:b\/><\/w:rPr><\/w:r>/);
   });
 });
 

@@ -9,6 +9,7 @@
 import { decodeAttrValue, decodeText, kid, kids, type XElement } from "@stitchdocx/package-io";
 import { walkBody, rowsOf, cellsOf, rowRevision, type BodyContext, type BodyWalk } from "./body.js";
 import { stepFields } from "./fields.js";
+import type { StyleSheet } from "./styles.js";
 
 export const REVISION_NAMES = new Set(["w:ins", "w:del", "w:moveFrom", "w:moveTo"]);
 const SKIPPED = new Set(["w:pPr", "w:rPr", "w:instrText", "w:delInstrText"]);
@@ -17,13 +18,11 @@ const SKIPPED = new Set(["w:pPr", "w:rPr", "w:instrText", "w:delInstrText"]);
  *  Choice, else the Fallback) */
 const UNSHOWN = new Set(["w:txbxContent"]);
 
-/** run properties that hide a run from Word's display: hidden text is never
- *  part of the listed text, and never copied onto inserted runs */
-const HIDDEN_PR = new Set(["w:vanish", "w:specVanish", "w:webHidden"]);
-
-/** namespace prefixes an AlternateContent Choice may require for us to read
- *  that branch (the prefixes this engine understands) */
-const MC_SUPPORTED = new Set(["w", "w14", "w15"]);
+/** namespace prefixes current Word renders in an AlternateContent Choice */
+const MC_SUPPORTED = new Set([
+  "w14", "w15", "w16", "w16se", "w16cid", "w16cex", "w16du", "w16sdtdh",
+  "wps", "wpg", "wpc", "wpi", "wp14", "a14", "v", "o", "w10", "m",
+]);
 
 /** decision for a revision element */
 export type View = (rev: { id: string | null; author: string | null; name: string }) => "accept" | "reject";
@@ -37,15 +36,8 @@ export function attrVal(el: XElement, name: string): string | null {
   return a ? decodeAttrValue(a.raw) : null;
 }
 
-/** true when the run carries a hide-from-display run property */
-export function runHidden(r: XElement): boolean {
-  const rPr = kid(r, "w:rPr");
-  if (!rPr) return false;
-  return kids(rPr).some((c) => HIDDEN_PR.has(c.name));
-}
-
-/** the AlternateContent branch Word would render: the first Choice whose
- *  Requires namespaces we understand, else the Fallback */
+/** the AlternateContent branch Word renders: the first Choice whose
+ *  Requires prefixes Word all supports, else the Fallback */
 export function mcBranch(ac: XElement): XElement | null {
   for (const choice of kids(ac, "mc:Choice")) {
     const req = attrVal(choice, "Requires") ?? "";
@@ -55,9 +47,9 @@ export function mcBranch(ac: XElement): XElement | null {
   return kid(ac, "mc:Fallback") ?? null;
 }
 
-/** the one character a w:sym contributes: the code point named by w:char */
+/** the one character a w:sym (w:char) or w16se:symEx (w16se:char) contributes */
 export function symChar(el: XElement): string | null {
-  let raw = attrVal(el, "w:char");
+  let raw = attrVal(el, el.name === "w16se:symEx" ? "w16se:char" : "w:char");
   if (raw === null) return null;
   raw = raw.replace(/^0[xX]/, "");
   const n = parseInt(raw, 16);
@@ -105,7 +97,7 @@ export interface WalkCallbacks {
  * the Word-supported AlternateContent branch (whose content is listed but
  * locked), and report visible char elements in document order.
  */
-export function walkContent(p: XElement, view: View, cb: WalkCallbacks, fields: string[] = []): void {
+export function walkContent(p: XElement, view: View, styles: StyleSheet, cb: WalkCallbacks, fields: string[] = []): void {
   visitKids(p, true, fields, false);
 
   function visitKids(node: XElement, shown: boolean, fields: string[], locked: boolean): void {
@@ -137,11 +129,11 @@ export function walkContent(p: XElement, view: View, cb: WalkCallbacks, fields: 
     }
     const inInstr = fields.includes("instr");
     if (c.name === "w:r") {
-      if (runHidden(c)) return;
+      if (styles.runHidden(c, p)) return;
       visitKids(c, shown, fields, locked);
       return;
     }
-    if (c.name === "w:sym") {
+    if (c.name === "w:sym" || c.name === "w16se:symEx") {
       if (shown && !inInstr) cb.onCharEl?.(c, "sym", fields.length > 0, locked);
       return;
     }
@@ -185,9 +177,9 @@ export function walkContent(p: XElement, view: View, cb: WalkCallbacks, fields: 
   }
 }
 
-export function paragraphText(p: XElement, view: View, fields: string[] = []): string {
+export function paragraphText(p: XElement, view: View, styles: StyleSheet, fields: string[] = []): string {
   let out = "";
-  walkContent(p, view, {
+  walkContent(p, view, styles, {
     onCharEl: (el, kind) => {
       if (kind === "text") out += wordText(el);
       else if (kind === "sym") out += symChar(el) ?? "";
@@ -249,7 +241,7 @@ export function paragraphProps(p: XElement): { style: string | null; numbered: b
  * - at the end of the body or of a content control, the paragraph stays,
  *   empty or not.
  */
-export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagraph[] {
+export function projectParagraphs(walk: BodyWalk, view: View, styles: StyleSheet): ProjectionParagraph[] {
   const out: ProjectionParagraph[] = [];
   let tableIndex = -1;
   // the complex-field cursor is threaded through the whole story: a TOC's
@@ -269,7 +261,7 @@ export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagra
           table: ctx.table ?? null,
           inContentControl: ctx.sdt,
           ...props,
-          text: (pending?.text ?? "") + paragraphText(c, view, fields),
+          text: (pending?.text ?? "") + paragraphText(c, view, styles, fields),
           removedMark: null,
           carried: pending !== null,
           merged: pending ? [...pending.merged, pending.node] : [],

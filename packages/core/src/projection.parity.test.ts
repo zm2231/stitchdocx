@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import { decodeAttrValue, decodePart, mainPartName, readPackage, parseXml, kid, entryBytes } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { projectParagraphs, type View } from "./projection.js";
+import { StyleSheet } from "./styles.js";
 
 const ACCEPTANCE = process.env.DOCX_ACCEPTANCE_DIR ?? "";
 
@@ -62,7 +63,7 @@ function ourProject(bytes: Uint8Array, view: View) {
   const entries = readPackage(bytes);
   const tree = parseXml(decodePart(entryBytes(entries.get(mainPartName(entries))!)));
   const root = kid(tree as any, "w:document")!;
-  return projectParagraphs(walkBody(root), view);
+  return projectParagraphs(walkBody(root), view, StyleSheet.empty);
 }
 
 const readerProject = (bytes: Uint8Array, v: unknown) =>

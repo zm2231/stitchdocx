@@ -48,9 +48,12 @@ Text that Word does not render or will discard is never a valid edit target:
 complex-field instructions are omitted from `text`, field results (including
 `w:fldSimple` content and everything under a TOC's separate) are listed but
 refused with `span_in_field`, and AlternateContent branches and office math
-(`m:oMath`) are listed but refused with `span_crosses_structure`. Hidden runs (`w:vanish`, `w:specVanish`,
-`w:webHidden`) are not listed at all, and engine insertions never inherit
-hidden formatting. A table row the client tracked as inserted or deleted is
+(`m:oMath`) are listed but refused with `span_crosses_structure`. Text Word hides is not
+listed: a run's own `w:vanish` decides, else the paragraph and character
+style chains combine by exclusive or, else `docDefaults` (`w:specVanish` and
+`w:webHidden` text prints in Word and is listed). Engine insertions stay
+visible, with an explicit `w:vanish w:val="0"` where copied formatting would
+hide them. A table row the client tracked as inserted or deleted is
 shown or dropped per Word's accept/reject rules, and spans inside a tracked
 row refuse with `span_overlaps_revision`.
 

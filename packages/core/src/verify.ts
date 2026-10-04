@@ -4,10 +4,11 @@
 // every other package entry is byte-identical and none is added or removed,
 // and the main part outside paragraphs is canonically identical. Tampering
 // anywhere fails.
-import { cloneNode, decodePart, decodeEntities, kid, mainPartName, openPackage, parseXml, serializeXml, removeAttr, setAttr, textNode, type XElement } from "@stitchdocx/package-io";
+import { cloneNode, decodePart, decodeEntities, kid, kids, mainPartName, openPackage, parseXml, relatedPart, serializeXml, removeAttr, setAttr, textNode, type XElement } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
-import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, runHidden, wordText, type View } from "./projection.js";
+import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, wordText, type View } from "./projection.js";
 import { isRevisionEl } from "./revisions.js";
+import { StyleSheet } from "./styles.js";
 import type { Addr, Receipt } from "./types.js";
 
 export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts: Receipt[]): { ok: boolean; failures: string[] } {
@@ -40,8 +41,8 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     failures.push("document content outside paragraphs was modified");
   }
 
-  const origRecords = projectParagraphs(origDoc.walk, acceptAll);
-  const outRecords = projectParagraphs(outDoc.walk, acceptAll);
+  const origRecords = projectParagraphs(origDoc.walk, acceptAll, origDoc.styles);
+  const outRecords = projectParagraphs(outDoc.walk, acceptAll, outDoc.styles);
   const outById = new Map<string, (typeof outRecords)[number]>();
   for (const r of outRecords) if (r.addr) outById.set(r.addr, r);
   const origByAddr = new Map<string, (typeof origRecords)[number]>();
@@ -67,7 +68,7 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     const ids = new Set((r.changeIds ?? []).map(String));
     const rejectMine: View = (rev) => (rev.id !== null && ids.has(rev.id) ? "reject" : "accept");
     if (r.insertedAddr) {
-      const rejRecords = projectParagraphs(outDoc.walk, rejectMine);
+      const rejRecords = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles);
       const rejByAddr = new Map<string, (typeof rejRecords)[number]>();
       for (const rec of rejRecords) if (rec.addr) rejByAddr.set(rec.addr, rec);
       const rejected = rejByAddr.get(r.insertedAddr);
@@ -97,8 +98,8 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     }
     // receipts report in projection-record space: a removed mark may merge
     // other paragraphs' content into this record under either view
-    const rejectedRecord = projectParagraphs(outDoc.walk, rejectMine).find((rec) => rec.addr === r.addr);
-    const rejectedText = rejectedRecord ? rejectedRecord.text : paragraphText(target.node, rejectMine);
+    const rejectedRecord = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles).find((rec) => rec.addr === r.addr);
+    const rejectedText = rejectedRecord ? rejectedRecord.text : paragraphText(target.node, rejectMine, outDoc.styles);
     if (rejectedText !== r.before) failures.push(`receipt ${r.index}: reject yields ${JSON.stringify(rejectedText)}, expected before ${JSON.stringify(r.before ?? "")}`);
     if (target.text !== r.after) failures.push(`receipt ${r.index}: accept yields ${JSON.stringify(target.text)}, expected after ${JSON.stringify(r.after ?? "")}`);
   }
@@ -145,7 +146,10 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
   }
   for (const rev of walkEls(outDoc.root)) {
     if ((rev.name !== "w:ins" && rev.name !== "w:moveTo") || !allOurs.has(attrVal(rev, "w:id") ?? "")) continue;
-    if (walkEls(rev).some((c) => c.name === "w:r" && runHidden(c))) failures.push(`change ${attrVal(rev, "w:id")} inserts hidden text`);
+    const para = enclosingParagraph(rev);
+    const hidden = (r: XElement) =>
+      outDoc.styles.runHidden(r, para) || kids(kid(r, "w:rPr")).some((c) => c.name === "w:specVanish" || c.name === "w:webHidden");
+    if (walkEls(rev).some((c) => c.name === "w:r" && hidden(c))) failures.push(`change ${attrVal(rev, "w:id")} inserts hidden text`);
   }
 
   const expectedCount = origRecords.length + insertAddrs.size;
@@ -369,6 +373,12 @@ function runKey(run: XElement): string {
 }
 
 
+function enclosingParagraph(node: XElement): XElement | null {
+  let cur: XElement | null = node.parent;
+  while (cur && cur.name !== "w:p") cur = cur.parent;
+  return cur;
+}
+
 function openForVerify(bytes: Uint8Array) {
   const reader = openPackage(bytes);
   const docXml = reader.part(mainPartName(reader));
@@ -376,7 +386,8 @@ function openForVerify(bytes: Uint8Array) {
   const tree = parseXml(decodePart(docXml));
   const root = kid(tree as any, "w:document");
   if (!root) throw new Error("word/document.xml has no w:document root");
-  return { walk: walkBody(root), root };
+  const stylesPart = reader.part(relatedPart(reader, mainPartName(reader), "styles") ?? "word/styles.xml");
+  return { walk: walkBody(root), root, styles: StyleSheet.parse(stylesPart ? decodePart(stylesPart) : undefined) };
 }
 
 function collectRevisionAuthors(root: any, ids: Map<string, string>): void {
