@@ -338,3 +338,66 @@ describe("input limits refuse hostile packages with typed errors (F13)", () => {
     expect(() => normalizeDocx(writePackage(entries))).toThrow(PackageLimitError);
   });
 });
+
+describe("explicit paragraph scope and surrogate offsets (F2, F10)", () => {
+  it('scope "paragraph" hits the same refusals as no scope', () => {
+    const control = (p: string): string => `<w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent>${p}</w:sdtContent></w:sdt>`;
+    const body = control(P("10000001", R("Client name"))) + P("10000002", R("After"));
+    for (const scope of [undefined, "paragraph"] as const) {
+      const { receipts } = runApply(body, [
+        { op: "insertParagraphAfter", ref: "a", author: AUTHOR, addr: "10000001", text: "New para", ...(scope ? { scope } : {}) },
+      ]);
+      expect(receipts[0]!.status).toBe("refused");
+      expect(receipts[0]!.reason).toBe("insert_in_plain_text_control");
+    }
+  });
+
+  it("an offset inside a surrogate pair refuses as out of range", () => {
+    const body = P("10000001", R("Rate \u{1F600} applies"));
+    const listed = openDocument(docx(body)).projection()[0]!.text;
+    expect(listed).toBe("Rate \u{1F600} applies");
+    const { receipts } = runApply(body, [
+      { op: "delete", ref: "y", author: AUTHOR, addr: "10000001", start: 6, end: 15, expectText: listed.slice(6, 15) },
+    ]);
+    expect(receipts[0]!.status).toBe("refused");
+    expect(receipts[0]!.reason).toBe("span_out_of_range");
+    // whole-character offsets still work
+    const ok = runApply(body, [
+      { op: "replace", ref: "z", author: AUTHOR, addr: "10000001", start: 5, end: 7, expectText: "\u{1F600}", text: "😎" },
+    ]);
+    expect(ok.receipts[0]!.status).toBe("applied");
+    expect(verifyOutput(normalizeDocx(docx(body)).docx, ok.out, ok.receipts).ok).toBe(true);
+  });
+});
+
+describe("AlternateContent branches and office math are listed but locked (F17, F18)", () => {
+  it("a supported Choice is read once and its spans refuse", () => {
+    const body =
+      P("10000001", R("Before ") + `<mc:AlternateContent><mc:Choice Requires="w14"><w:r><w:t>chosen words</w:t></w:r></mc:Choice><mc:Choice Requires="wps"><w:r><w:t>shape fallback</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>fallback words</w:t></w:r></mc:Fallback></mc:AlternateContent>` + R(" after"));
+    const doc = openDocument(docx(body));
+    expect(doc.projection().map((p) => p.text)).toEqual(["Before chosen words after"]);
+    const { receipts } = runApply(body, [
+      { op: "replace", ref: "c1", author: AUTHOR, addr: "10000001", start: 7, end: 13, expectText: "chosen", text: "X" },
+      { op: "replace", ref: "c2", author: AUTHOR, addr: "10000001", start: 0, end: 6, expectText: "Before", text: "Y" },
+    ]);
+    expect(receipts.map((r) => `${r.ref}:${r.status}${r.reason ? "/" + r.reason : ""}`)).toEqual([
+      "c1:refused/span_in_alternate_content",
+      "c2:applied",
+    ]);
+  });
+
+  it("an unsupported Requires falls back, and math text lists locked", () => {
+    const body =
+      P("10000001", R("Fee ") + `<mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>shape</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>picture</w:t></w:r></mc:Fallback></mc:AlternateContent>` + R(" and ") + `<m:oMath><m:r><m:t>E=mc^2</m:t></m:r></m:oMath>`) + P("10000002", R("End"));
+    const doc = openDocument(docx(body));
+    expect(doc.projection().map((p) => p.text)).toEqual(["Fee picture and E=mc^2", "End"]);
+    const { receipts } = runApply(body, [
+      { op: "replace", ref: "m1", author: AUTHOR, addr: "10000001", start: 16, end: 19, expectText: "E=m", text: "X" },
+      { op: "replace", ref: "m2", author: AUTHOR, addr: "10000002", start: 0, end: 3, expectText: "End", text: "Fin" },
+    ]);
+    expect(receipts.map((r) => `${r.ref}:${r.status}${r.reason ? "/" + r.reason : ""}`)).toEqual([
+      "m1:refused/span_in_math",
+      "m2:applied",
+    ]);
+  });
+});
