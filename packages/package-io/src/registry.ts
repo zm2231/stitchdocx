@@ -1,7 +1,7 @@
 // Light part registry: [Content_Types].xml and relationship parts. The gate
 // never adds or removes parts, so this exists to answer "what is this part"
 // questions and to keep door open for later phases (comments, headers).
-import { decodePart, entryBytes, PACKAGE_LIMITS, type EntryData } from "./zip.js";
+import { PACKAGE_LIMITS, xmlText, type EntryData } from "./zip.js";
 import { decodeEntities, kid, kids, NodeBudget, parseXml, serializeXml, type XElement, type XDoc } from "./xml.js";
 
 export interface ContentTypes {
@@ -65,7 +65,7 @@ export function relatedPart(entries: Parts, source: string, type: string): strin
   const dir = source.slice(0, slash + 1);
   const relsXml = entries.get(`${dir}_rels/${source.slice(slash + 1)}.rels`);
   if (!relsXml) return null;
-  const rel = parseRels(decodePart(entryBytes(relsXml))).find(
+  const rel = parseRels(xmlText(`${dir}_rels/${source.slice(slash + 1)}.rels`, relsXml)).find(
     (r) => r.targetMode !== "External" && REL_BASES.some((ns) => r.type === ns + type),
   );
   if (!rel) return null;
@@ -83,7 +83,7 @@ export function relatedParts(entries: Parts, source: string, type: string): stri
   const relsXml = entries.get(`${dir}_rels/${source.slice(slash + 1)}.rels`);
   if (!relsXml) return [];
   const out: string[] = [];
-  for (const rel of parseRels(decodePart(entryBytes(relsXml)))) {
+  for (const rel of parseRels(xmlText(`${dir}_rels/${source.slice(slash + 1)}.rels`, relsXml))) {
     if (r_targetModeExternal(rel) || !REL_BASES.some((ns) => rel.type === ns + type)) continue;
     const parts = (rel.target.startsWith("/") ? rel.target.slice(1) : dir + rel.target).split("/");
     const path: string[] = [];

@@ -1,5 +1,5 @@
-// Memory bounds. The main part is held as decoded source, so its size is
-// bounded in bytes. Every parse is bounded in nodes, because bytes do not bound
+// Memory bounds. Every XML part, the main part included, is bounded in bytes
+// before it inflates (PACKAGE_LIMITS.maxXmlPartBytes). Every parse is bounded in nodes, because bytes do not bound
 // a tree: a small part can hold a dense grid of tiny cells. The main part's
 // block structure and every paragraph parsed in place draw on one budget per
 // open document, and its paragraphs carry per-paragraph state besides, so its
@@ -7,11 +7,9 @@
 // of the same limit, and any other part one of PACKAGE_LIMITS.maxPartNodes. A
 // document over a limit is refused as document_too_large, so the caller can
 // route it elsewhere.
-import { decodePart, NodeBudget, PACKAGE_LIMITS, PackageLimitError, parseXml, type PackageReader, type XDoc } from "@stitchdocx/package-io";
+import { NodeBudget, PACKAGE_LIMITS, parseXml, type PackageReader, type XDoc } from "@stitchdocx/package-io";
 
 export const DOCUMENT_LIMITS = {
-  /** uncompressed bytes of the main document part */
-  maxMainPartBytes: 8 * 1024 * 1024,
   /** nodes of the main part's block structure plus its paragraphs parsed in place */
   maxMainPartNodes: 40_000,
 };
@@ -29,10 +27,7 @@ export function parsePart(source: string): XDoc {
 
 /** the main part's decoded source; refuses document_too_large over the limit */
 export function mainPartSource(reader: PackageReader, mainPart: string): string {
-  const size = reader.size(mainPart);
-  if (size === undefined) throw new Error(`${mainPart} missing`);
-  if (size > DOCUMENT_LIMITS.maxMainPartBytes) {
-    throw new PackageLimitError("document_too_large", `${mainPart} inflates to ${size} bytes, over the limit of ${DOCUMENT_LIMITS.maxMainPartBytes}`);
-  }
-  return decodePart(reader.part(mainPart)!);
+  const source = reader.xml(mainPart);
+  if (source === undefined) throw new Error(`${mainPart} missing`);
+  return source;
 }

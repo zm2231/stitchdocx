@@ -6,12 +6,14 @@
 // Every timestamp field is fixed: the same entries always produce the same
 // bytes.
 //
-// Archives are read central-directory first, with input limits enforced before
-// anything inflates: total and per-entry uncompressed size, entry count,
-// duplicate names and encrypted entries are refused with a typed error, and
-// parts a command does not need stay uninflated (RawEntry — the writer passes
-// them through with their original compressed bytes).
-import { deflateSync, inflateSync, unzipSync } from "fflate";
+// Archives are read central-directory first (ZIP64 included), with input
+// limits enforced before anything inflates: total and per-entry uncompressed
+// size, entry count, duplicate names and encrypted entries are refused with a
+// typed error. Entries stay compressed (RawEntry, which the writer passes
+// through with its original bytes) until a part is asked for, every inflate
+// is capped at the entry's recorded size, and an XML part over
+// maxXmlPartBytes is refused before it inflates.
+import { deflateSync, Inflate, inflateSync } from "fflate";
 
 export type Entries = Map<string, EntryData>;
 
@@ -38,6 +40,9 @@ export const PACKAGE_LIMITS = {
   maxEntryUncompressed: 64 * 1024 * 1024,
   /** entry count */
   maxEntries: 4096,
+  /** uncompressed bytes of one XML part a command reads (main part, styles,
+   *  numbering, settings, rels, story parts) */
+  maxXmlPartBytes: 8 * 1024 * 1024,
   /** nodes one parse may build (see NodeBudget): an XML tree costs far more
    *  per node than per byte, so bytes alone do not bound it */
   maxPartNodes: 60_000,
@@ -55,14 +60,105 @@ export class RawEntry {
 
 export type EntryData = Uint8Array | RawEntry;
 
-/** inflated bytes of an entry, inflating on demand when it is a RawEntry */
+/** inflated bytes of an entry, inflating on demand when it is a RawEntry;
+ *  never more than the size the archive records */
 export function entryBytes(e: EntryData): Uint8Array {
-  if (e instanceof RawEntry) {
-    if (e.method === 0) return e.compressed;
-    if (e.method === 8) return inflateSync(e.compressed);
-    throw new PackageLimitError("unreadable_archive", `unsupported compression method ${e.method}`);
+  if (!(e instanceof RawEntry)) return e;
+  let out: Uint8Array;
+  if (e.method === 0) out = e.compressed;
+  else if (e.method === 8) {
+    try {
+      out = inflateSync(e.compressed, { out: new Uint8Array(e.size + 1) });
+    } catch (err) {
+      throw new PackageLimitError("unreadable_archive", `entry does not inflate: ${String(err)}`);
+    }
+  } else throw new PackageLimitError("unreadable_archive", `unsupported compression method ${e.method}`);
+  if (out.length !== e.size) throw new PackageLimitError("unreadable_archive", `entry holds ${out.length === e.size + 1 ? "more" : out.length} bytes, the archive records ${e.size}`);
+  return out;
+}
+
+/** uncompressed size of an entry */
+export function entrySize(e: EntryData): number {
+  return e instanceof RawEntry ? e.size : e.length;
+}
+
+/** decoded text of an XML part; refuses document_too_large over
+ *  maxXmlPartBytes before inflating */
+export function xmlText(name: string, e: EntryData): string {
+  const size = entrySize(e);
+  if (size > PACKAGE_LIMITS.maxXmlPartBytes) {
+    throw new PackageLimitError("document_too_large", `${name} inflates to ${size} bytes, over the limit of ${PACKAGE_LIMITS.maxXmlPartBytes}`);
   }
-  return e;
+  return decodePart(entryBytes(e));
+}
+
+/** inflated content of an entry in chunks; a deflated entry inflates a few KB
+ *  of input at a time, so no chunk is large and nothing holds the whole entry */
+function* entryChunks(e: EntryData): Generator<Uint8Array> {
+  if (!(e instanceof RawEntry) || e.method === 0) {
+    yield entryBytes(e);
+    return;
+  }
+  if (e.method !== 8) throw new PackageLimitError("unreadable_archive", `unsupported compression method ${e.method}`);
+  const pending: Uint8Array[] = [];
+  const inflater = new Inflate((chunk) => {
+    pending.push(chunk);
+  });
+  const STEP = 4096;
+  let produced = 0;
+  for (let at = 0; at < e.compressed.length; at += STEP) {
+    try {
+      inflater.push(e.compressed.subarray(at, at + STEP), at + STEP >= e.compressed.length);
+    } catch (err) {
+      throw new PackageLimitError("unreadable_archive", `entry does not inflate: ${String(err)}`);
+    }
+    for (const chunk of pending.splice(0)) {
+      produced += chunk.length;
+      if (produced > e.size) throw new PackageLimitError("unreadable_archive", `entry holds more bytes than the archive records (${e.size})`);
+      yield chunk;
+    }
+  }
+  if (produced !== e.size) throw new PackageLimitError("unreadable_archive", `entry holds ${produced} bytes, the archive records ${e.size}`);
+}
+
+/** whether two entries hold the same content, compared chunk by chunk */
+export function entriesEqual(a: EntryData, b: EntryData): boolean {
+  if (entrySize(a) !== entrySize(b)) return false;
+  if (a instanceof RawEntry && b instanceof RawEntry && a.method === b.method && a.crc === b.crc && bytesEqual(a.compressed, b.compressed)) return true;
+  const ia = entryChunks(a);
+  const ib = entryChunks(b);
+  let ca: Uint8Array = new Uint8Array(0);
+  let cb: Uint8Array = ca;
+  for (;;) {
+    if (ca.length === 0) {
+      const n = ia.next();
+      if (n.done) break;
+      ca = n.value;
+      continue;
+    }
+    if (cb.length === 0) {
+      const n = ib.next();
+      if (n.done) return false;
+      cb = n.value;
+      continue;
+    }
+    const k = Math.min(ca.length, cb.length);
+    for (let i = 0; i < k; i++) if (ca[i] !== cb[i]) return false;
+    ca = ca.subarray(k);
+    cb = cb.subarray(k);
+  }
+  while (cb.length === 0) {
+    const n = ib.next();
+    if (n.done) return true;
+    cb = n.value;
+  }
+  return false;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 interface CentralEntry {
@@ -82,72 +178,40 @@ interface CentralEntry {
 export class PackageReader {
   readonly names: string[];
   private central: Map<string, CentralEntry>;
-  private eager: Map<string, Uint8Array> | null;
 
   constructor(private data: Uint8Array) {
     const central = readCentralDirectory(data);
-    if (central) {
-      this.eager = null;
-      this.names = central.map((e) => e.name);
-      this.central = new Map(central.map((e) => [e.name, e]));
-      if (central.length > PACKAGE_LIMITS.maxEntries) {
-        throw new PackageLimitError("too_many_entries", `archive holds ${central.length} entries, over the limit of ${PACKAGE_LIMITS.maxEntries}`);
+    this.names = central.map((e) => e.name);
+    this.central = new Map(central.map((e) => [e.name, e]));
+    let total = 0;
+    const seen = new Set<string>();
+    for (const e of central) {
+      if (e.flags & 1) throw new PackageLimitError("encrypted_entry", `entry ${e.name} is encrypted`);
+      if (seen.has(e.name)) throw new PackageLimitError("duplicate_entry", `archive holds duplicate entry ${e.name}`);
+      seen.add(e.name);
+      total += e.size;
+      if (e.size > PACKAGE_LIMITS.maxEntryUncompressed) {
+        throw new PackageLimitError("package_too_large", `entry ${e.name} inflates to ${e.size} bytes, over the per-entry limit`);
       }
-      let total = 0;
-      const seen = new Set<string>();
-      for (const e of central) {
-        if (e.flags & 1) throw new PackageLimitError("encrypted_entry", `entry ${e.name} is encrypted`);
-        if (seen.has(e.name)) throw new PackageLimitError("duplicate_entry", `archive holds duplicate entry ${e.name}`);
-        seen.add(e.name);
-        total += e.size;
-        if (e.size > PACKAGE_LIMITS.maxEntryUncompressed) {
-          throw new PackageLimitError("package_too_large", `entry ${e.name} inflates to ${e.size} bytes, over the per-entry limit`);
-        }
-      }
-      if (total > PACKAGE_LIMITS.maxTotalUncompressed) {
-        throw new PackageLimitError("package_too_large", `archive inflates to ${total} bytes, over the total limit`);
-      }
-    } else {
-      // zip64 or unusual layout: fall back to a full inflate, then apply the
-      // same limits to what actually came out
-      const unzipped = new Map(Object.entries(unzipSync(data)));
-      this.eager = unzipped;
-      this.central = new Map();
-      this.names = [...unzipped.keys()];
-      if (this.names.length > PACKAGE_LIMITS.maxEntries) {
-        throw new PackageLimitError("too_many_entries", `archive holds ${this.names.length} entries, over the limit of ${PACKAGE_LIMITS.maxEntries}`);
-      }
-      const seen = new Set<string>();
-      let total = 0;
-      for (const n of this.names) {
-        if (seen.has(n)) throw new PackageLimitError("duplicate_entry", `archive holds duplicate entry ${n}`);
-        seen.add(n);
-        total += unzipped.get(n)!.length;
-        if (unzipped.get(n)!.length > PACKAGE_LIMITS.maxEntryUncompressed) {
-          throw new PackageLimitError("package_too_large", `entry ${n} inflates to ${unzipped.get(n)!.length} bytes, over the per-entry limit`);
-        }
-      }
-      if (total > PACKAGE_LIMITS.maxTotalUncompressed) {
-        throw new PackageLimitError("package_too_large", `archive inflates to ${total} bytes, over the total limit`);
-      }
+    }
+    if (total > PACKAGE_LIMITS.maxTotalUncompressed) {
+      throw new PackageLimitError("package_too_large", `archive inflates to ${total} bytes, over the total limit`);
     }
   }
 
   has(name: string): boolean {
-    return this.eager ? this.eager.has(name) : this.central.has(name);
+    return this.central.has(name);
   }
 
-  /** inflated bytes of one part, inflating on demand */
-  part(name: string): Uint8Array | undefined {
-    if (this.eager) return this.eager.get(name);
+  /** decoded text of one XML part (see xmlText) */
+  xml(name: string): string | undefined {
     const raw = this.raw(name);
-    return raw ? entryBytes(raw) : undefined;
+    return raw ? xmlText(name, raw) : undefined;
   }
 
   /** one entry as stored: its compressed bytes, method, CRC and size, with
-   *  nothing inflated (an archive read eagerly hands back inflated bytes) */
-  raw(name: string): EntryData | undefined {
-    if (this.eager) return this.eager.get(name);
+   *  nothing inflated */
+  raw(name: string): RawEntry | undefined {
     const e = this.central.get(name);
     if (!e) return undefined;
     const local = e.localOffset;
@@ -158,28 +222,21 @@ export class PackageReader {
     const nameLen = view.getUint16(local + 26, true);
     const extraLen = view.getUint16(local + 28, true);
     const start = local + 30 + nameLen + extraLen;
+    if (start + e.compressedSize > this.data.length) {
+      throw new PackageLimitError("unreadable_archive", `entry ${name} runs past the end of the archive`);
+    }
     return new RawEntry(this.data.subarray(start, start + e.compressedSize), e.method, e.crc, e.size);
   }
 
-  /** uncompressed size of an entry as the archive records it */
-  size(name: string): number | undefined {
-    if (this.eager) return this.eager.get(name)?.length;
-    return this.central.get(name)?.size;
+  /** raw() under the registry's Parts interface */
+  get(name: string): EntryData | undefined {
+    return this.raw(name);
   }
 
-  /** part() under the registry's Parts interface */
-  get(name: string): Uint8Array | undefined {
-    return this.part(name);
-  }
-
-  /**
-   * Every entry, in central-directory order. Parts selected by `only` come
-   * back inflated; the rest stay RawEntry so the writer can pass their
-   * original compressed bytes through untouched.
-   */
-  readAll(only?: (name: string) => boolean): Entries {
+  /** every entry as stored, in central-directory order */
+  readAll(): Entries {
     const entries: Entries = new Map();
-    for (const name of this.names) entries.set(name, !only || only(name) ? this.part(name)! : this.raw(name)!);
+    for (const name of this.names) entries.set(name, this.raw(name)!);
     return entries;
   }
 }
@@ -254,12 +311,20 @@ function crc32(data: Uint8Array): number {
   return ~c >>> 0;
 }
 
-/** central-directory entries, or null when the layout is not a plain
- *  (non-zip64) archive we can scan */
-function readCentralDirectory(data: Uint8Array): CentralEntry[] | null {
+/** central-directory entries; ZIP64 sizes, offsets and counts are read from
+ *  their ZIP64 records */
+function readCentralDirectory(data: Uint8Array): CentralEntry[] {
+  const unreadable = (msg: string): never => {
+    throw new PackageLimitError("unreadable_archive", msg);
+  };
   // locate End of Central Directory (signature 0x06054b50) by scanning back;
   // the comment field may be up to 65535 bytes
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const u64 = (at: number): number => {
+    const v = view.getBigUint64(at, true);
+    if (v > BigInt(Number.MAX_SAFE_INTEGER)) unreadable("ZIP64 field out of range");
+    return Number(v);
+  };
   let eocd = -1;
   const min = Math.max(0, data.length - 22 - 65535);
   for (let i = data.length - 22; i >= min; i--) {
@@ -268,23 +333,64 @@ function readCentralDirectory(data: Uint8Array): CentralEntry[] | null {
       break;
     }
   }
-  if (eocd < 0) return null;
-  const count = view.getUint16(eocd + 10, true);
-  if (count === 0xffff) return null; // zip64: fall back to a full inflate
+  if (eocd < 0) unreadable("no end of central directory record");
+  let count = view.getUint16(eocd + 10, true);
   let ptr = view.getUint32(eocd + 16, true);
+  if (count === 0xffff || ptr === 0xffffffff) {
+    // ZIP64: the locator sits just before the EOCD and names the ZIP64 EOCD
+    const loc = eocd - 20;
+    if (loc < 0 || view.getUint32(loc, true) !== 0x07064b50) unreadable("ZIP64 locator missing");
+    const eocd64 = u64(loc + 8);
+    if (eocd64 + 56 > data.length || view.getUint32(eocd64, true) !== 0x06064b50) unreadable("ZIP64 end of central directory unreadable");
+    count = u64(eocd64 + 32);
+    ptr = u64(eocd64 + 48);
+  }
+  if (count > PACKAGE_LIMITS.maxEntries) {
+    throw new PackageLimitError("too_many_entries", `archive holds ${count} entries, over the limit of ${PACKAGE_LIMITS.maxEntries}`);
+  }
   const entries: CentralEntry[] = [];
   const decoder = new TextDecoder();
   for (let n = 0; n < count; n++) {
-    if (ptr + 46 > data.length || view.getUint32(ptr, true) !== 0x02014b50) return null;
+    if (ptr + 46 > data.length || view.getUint32(ptr, true) !== 0x02014b50) unreadable(`central directory entry ${n} unreadable`);
     const flags = view.getUint16(ptr + 8, true);
     const method = view.getUint16(ptr + 10, true);
     const crc = view.getUint32(ptr + 16, true);
-    const compressedSize = view.getUint32(ptr + 20, true);
-    const size = view.getUint32(ptr + 24, true);
+    let compressedSize = view.getUint32(ptr + 20, true);
+    let size = view.getUint32(ptr + 24, true);
     const nameLen = view.getUint16(ptr + 28, true);
     const extraLen = view.getUint16(ptr + 30, true);
     const commentLen = view.getUint16(ptr + 32, true);
-    const localOffset = view.getUint32(ptr + 42, true);
+    let localOffset = view.getUint32(ptr + 42, true);
+    const extraStart = ptr + 46 + nameLen;
+    const next = extraStart + extraLen + commentLen;
+    if (next > data.length) unreadable(`central directory entry ${n} runs past the end of the archive`);
+    if (size === 0xffffffff || compressedSize === 0xffffffff || localOffset === 0xffffffff) {
+      // the ZIP64 extended-information extra field (0x0001) holds, in order,
+      // each of these that is saturated
+      let at = extraStart;
+      let found = false;
+      while (at + 4 <= extraStart + extraLen) {
+        const tag = view.getUint16(at, true);
+        const len = view.getUint16(at + 2, true);
+        if (tag === 0x0001) {
+          let f = at + 4;
+          const end = f + len;
+          const take = (): number => {
+            if (f + 8 > end) unreadable(`central directory entry ${n} has a short ZIP64 field`);
+            const v = u64(f);
+            f += 8;
+            return v;
+          };
+          if (size === 0xffffffff) size = take();
+          if (compressedSize === 0xffffffff) compressedSize = take();
+          if (localOffset === 0xffffffff) localOffset = take();
+          found = true;
+          break;
+        }
+        at += 4 + len;
+      }
+      if (!found) unreadable(`central directory entry ${n} lacks its ZIP64 field`);
+    }
     entries.push({
       name: decoder.decode(data.subarray(ptr + 46, ptr + 46 + nameLen)),
       method,
@@ -294,7 +400,7 @@ function readCentralDirectory(data: Uint8Array): CentralEntry[] | null {
       compressedSize,
       localOffset,
     });
-    ptr += 46 + nameLen + extraLen + commentLen;
+    ptr = next;
   }
   return entries;
 }

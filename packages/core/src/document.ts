@@ -81,7 +81,7 @@ export class Document {
     this.ids = new RevisionIdAllocator(maxRevisionIdAcrossParts(this.reader, this.mainPart, source));
     this.paraIds = new ParaIdAllocator(paraIdsAcrossParts(this.reader, this.mainPart, source));
     // every entry stays compressed; save replaces the main part
-    this.entries = this.reader.readAll(() => false);
+    this.entries = this.reader.readAll();
   }
 
   static open(bytes: Uint8Array): Document {
@@ -136,8 +136,7 @@ export class Document {
   }
 
   private partText(name: string): string | undefined {
-    const bytes = this.reader.part(name);
-    return bytes ? decodePart(bytes) : undefined;
+    return this.reader.xml(name);
   }
 
   apply(ops: Op[], opts: { date: string }): Receipt[] {

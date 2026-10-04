@@ -6,16 +6,14 @@
 // anywhere fails.
 import {
   cloneNode,
-  decodePart,
   decodeEntities,
-  entryBytes,
+  entriesEqual,
   isPending,
   kid,
   kids,
   mainPartName,
   openPackage,
   pendingSource,
-  RawEntry,
   readView,
   relatedPart,
   removeAttr,
@@ -23,7 +21,6 @@ import {
   serializeXml,
   setAttr,
   textNode,
-  type EntryData,
   type PackageReader,
   type XElement,
 } from "@stitchdocx/package-io";
@@ -204,18 +201,6 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
   }
 
   return { ok: failures.length === 0, failures };
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-function entriesEqual(a: EntryData, b: EntryData): boolean {
-  if (a instanceof RawEntry && b instanceof RawEntry && a.method === b.method && a.crc === b.crc && a.size === b.size && bytesEqual(a.compressed, b.compressed)) return true;
-  return bytesEqual(entryBytes(a), entryBytes(b));
 }
 
 /** every element under `root`, reading an unparsed paragraph (through a
@@ -410,8 +395,7 @@ function openForVerify(reader: PackageReader) {
   const mainPart = mainPartName(reader);
   const source = mainPartSource(reader, mainPart);
   const { root } = parseMainPart(source);
-  const stylesPart = reader.part(relatedPart(reader, mainPart, "styles") ?? "word/styles.xml");
-  return { walk: walkBody(root), root, source, styles: StyleSheet.parse(stylesPart ? decodePart(stylesPart) : undefined) };
+  return { walk: walkBody(root), root, source, styles: StyleSheet.parse(reader.xml(relatedPart(reader, mainPart, "styles") ?? "word/styles.xml")) };
 }
 
 /** revision id → author for every revision-type element in the main part */

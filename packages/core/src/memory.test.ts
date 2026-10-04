@@ -5,7 +5,7 @@
 // parse is bounded in nodes, so a document whose tree would not fit is refused
 // rather than built.
 import { describe, expect, it } from "vitest";
-import { decodePart, encodePart, isPending, openPackage, PACKAGE_LIMITS, PackageLimitError, pendingElements, writePackage, type XElement } from "@stitchdocx/package-io";
+import { encodePart, isPending, openPackage, PACKAGE_LIMITS, PackageLimitError, pendingElements, writePackage, type XElement } from "@stitchdocx/package-io";
 import { DOCUMENT_LIMITS, finalizeDocx, normalizeDocx, openDocument, verifyOutput, type Op } from "./index.js";
 import type { Document } from "./document.js";
 import { acceptAll, projectParagraphs } from "./projection.js";
@@ -113,18 +113,29 @@ describe("paragraphs stay source until a command changes them", () => {
 });
 
 describe("document_too_large", () => {
-  it("every command refuses a main part over the limit before inflating it", () => {
+  const commands = (bytes: Uint8Array): string[] => [
+    refused(() => normalizeDocx(bytes)),
+    refused(() => openDocument(bytes)),
+    refused(() => finalizeDocx(bytes, [])),
+    refused(() => verifyOutput(bytes, bytes, [])),
+  ];
+
+  it("every command refuses a main part over the byte limit before inflating it", () => {
     const bytes = docx(P("10000001", R("Fees are $10,000.")));
-    const limit = DOCUMENT_LIMITS.maxMainPartBytes;
-    DOCUMENT_LIMITS.maxMainPartBytes = 100;
-    try {
-      expect(refused(() => normalizeDocx(bytes))).toBe("document_too_large");
-      expect(refused(() => openDocument(bytes))).toBe("document_too_large");
-      expect(refused(() => finalizeDocx(bytes, []))).toBe("document_too_large");
-      expect(refused(() => verifyOutput(bytes, bytes, []))).toBe("document_too_large");
-    } finally {
-      DOCUMENT_LIMITS.maxMainPartBytes = limit;
-    }
+    withLimit(PACKAGE_LIMITS, "maxXmlPartBytes", 100, () => expect(commands(bytes)).toEqual(Array(4).fill("document_too_large")));
+  });
+
+  it("every command that reads styles refuses a styles part over the byte limit, the main part under it", () => {
+    const styles = `<w:style w:styleId="Normal"/>`.repeat(200);
+    const bytes = docx(P("10000001", R("Fees are $10,000.")), { styles });
+    withLimit(PACKAGE_LIMITS, "maxXmlPartBytes", 2000, () => expect(commands(bytes)).toEqual(["accepted", ...Array(3).fill("document_too_large")]));
+  });
+
+  it("a paragraph nested past the depth limit is refused, not failed, once it is read", () => {
+    const deep = "<w:sdt><w:sdtContent>".repeat(300) + R("x") + "</w:sdtContent></w:sdt>".repeat(300);
+    const bytes = docx(P("10000001", deep));
+    expect(refused(() => openDocument(bytes).projection())).toBe("document_too_large");
+    expect(refused(() => verifyOutput(bytes, bytes, []))).toBe("document_too_large");
   });
 });
 
@@ -184,7 +195,7 @@ describe("normalize repairs story-part ids in document order", () => {
     const header = P("30000001", R("First.")) + P("30000001", R("Second."));
     const out = normalizeDocx(docx(P("10000001", R("Body.")), { header }));
     expect(out.assigned).toBe(1);
-    const xml = decodePart(openPackage(out.docx).part("word/header1.xml")!);
+    const xml = openPackage(out.docx).xml("word/header1.xml")!;
     expect(xml.startsWith(DECL)).toBe(true);
     const ids = [...xml.matchAll(/w14:paraId="([0-9A-F]+)"/g)].map((m) => m[1]);
     expect(ids[0]).toBe("30000001");

@@ -334,7 +334,7 @@ describe("verify is a whole-package gate (F8)", () => {
 
   it("a tampered header, a hidden run in the touched paragraph, or an extra zip entry each fail", () => {
     const { norm, out, receipts } = apply1();
-    const decode = (bytes: Uint8Array): Map<string, Uint8Array> => new Map([...readPackage(bytes)].map(([n, b]) => [n, b] as [string, Uint8Array]));
+    const decode = (bytes: Uint8Array): Map<string, Uint8Array> => new Map([...readPackage(bytes)].map(([n, b]) => [n, entryBytes(b)] as [string, Uint8Array]));
 
     const hdrTampered = decode(out);
     hdrTampered.set("word/header1.xml", encodePart(hdr.replace("ACME Confidential", "ACME Public")));

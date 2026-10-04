@@ -111,7 +111,7 @@ export function parseXml(source: string, opts: ParseOptions = {}): XDoc {
       // in every recursive walk (serialize, clone, resolve)
       if (base + stack.length >= MAX_XML_DEPTH) {
         i = s.length;
-        throw new Error(`xml parse: element nesting deeper than ${MAX_XML_DEPTH}`);
+        throw new PackageLimitError("document_too_large", `xml parse: element nesting deeper than ${MAX_XML_DEPTH}`);
       }
       n.parent = stack.length ? stack[stack.length - 1]! : null;
     }

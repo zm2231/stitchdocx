@@ -21,9 +21,9 @@ export const W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml";
  *  never modified here — callers surface the restriction to the user. */
 export function readProtection(reader: PackageReader, mainPart: string): string | null {
   const settingsPart = relatedPart(reader, mainPart, "settings") ?? "word/settings.xml";
-  const settingsXml = reader.part(settingsPart);
-  if (!settingsXml) return null;
-  const tree = parsePart(decodePart(settingsXml));
+  const settingsXml = reader.xml(settingsPart);
+  if (settingsXml === undefined) return null;
+  const tree = parsePart(settingsXml);
   const settings = kid(tree as unknown as XElement, "w:settings");
   if (!settings) return null;
   const dp = kid(settings, "w:documentProtection");
@@ -98,9 +98,9 @@ export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: 
   // repair is parsed, one at a time, after the main part's ids are assigned
   const otherPlans = new Map<string, { count: number; positions: number[] }>();
   for (const part of wordprocessingPartNames(reader, mainPart).slice(1)) {
-    const bytes = reader.part(part);
-    if (!bytes) continue;
-    const ids = scannedParaIds(decodePart(bytes));
+    const source = reader.xml(part);
+    if (source === undefined) continue;
+    const ids = scannedParaIds(source);
     const positions = planPart(ids, globalSeen);
     if (positions.length > 0) otherPlans.set(part, { count: ids.length, positions });
   }
@@ -124,7 +124,7 @@ export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: 
     changedParts.set(mainPart, serializeXml(tree));
   }
   for (const [part, { count, positions }] of otherPlans) {
-    const tree = parsePart(decodePart(reader.part(part)!));
+    const tree = parsePart(reader.xml(part)!);
     const partRootEl = kid(tree as unknown as XElement);
     if (!partRootEl) throw new Error(`${part} has no root element`);
     const paragraphs = paragraphsInOrder(partRootEl);
@@ -136,7 +136,7 @@ export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: 
 
   const protection = readProtection(reader, mainPart);
   if (changedParts.size === 0) return { docx: bytes, assigned: 0, protection };
-  const entries = reader.readAll(() => false);
+  const entries = reader.readAll();
   for (const [name, xml] of changedParts) entries.set(name, encodePart(xml));
   return { docx: writePackage(entries), assigned, protection };
 }

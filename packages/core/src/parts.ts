@@ -25,8 +25,8 @@ function* partSources(reader: PackageReader, mainPart: string, mainSource: strin
       yield mainSource;
       continue;
     }
-    const bytes = reader.part(name);
-    if (bytes) yield decodePart(bytes);
+    const source = reader.xml(name);
+    if (source !== undefined) yield source;
   }
 }
 
