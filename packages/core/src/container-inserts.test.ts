@@ -130,6 +130,35 @@ describe("inserted paragraph at the end of a container", () => {
     }
   });
 
+  describe.each([
+    { where: "body end", wrap: (anchor: string) => P("10000001", R("Earlier paragraph.")) + anchor, before: ["Earlier paragraph."], after: [] as string[] },
+    { where: "mid body", wrap: (anchor: string) => anchor + P("10000009", R("Later paragraph.")), before: [] as string[], after: ["Later paragraph."] },
+    { where: "cell end", wrap: (anchor: string) => `<w:tbl><w:tr><w:tc>${P("10000001", R("Cell start."))}${anchor}</w:tc></w:tr></w:tbl>` + P("10000009", R("After.")), before: ["Cell start."], after: ["After."] },
+    { where: "content control end", wrap: (anchor: string) => `<w:sdt><w:sdtContent>${P("10000001", R("Control start."))}${anchor}</w:sdtContent></w:sdt>` + P("10000009", R("After.")), before: ["Control start."], after: ["After."] },
+    { where: "before a table", wrap: (anchor: string) => anchor + `<w:tbl><w:tr><w:tc>${P("10000009", R("Cell."))}</w:tc></w:tr></w:tbl>`, before: [] as string[], after: ["Cell."] },
+  ])("a chain at $where", ({ wrap, before, after }) => {
+    it.each([1, 2, 3])("every accept/reject subset of %i inserts leaves exactly the kept paragraphs", (n) => {
+      const body = wrap(P("10000000", `<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>` + R("Anchor.")));
+      const texts = Array.from({ length: n }, (_, i) => `Insert ${i + 1}.`);
+      const ops: Op[] = texts.map((text, i) => ({ op: "insertParagraphAfter", ref: `r${i}`, author: `Reviewer ${i}`, addr: "10000000", text }));
+      const { receipts, out } = runOn(body, ops);
+      expect(receipts.map((r) => r.status)).toEqual(texts.map(() => "applied"));
+      expect(verifyOutput(normalizeDocx(docx(body)).docx, out, receipts).failures).toEqual([]);
+      for (let mask = 0; mask < 1 << n; mask++) {
+        const keep = texts.map((_, i) => (mask >> i) & 1 ? "accept" : "reject" as const);
+        const doc = openDocument(out);
+        doc.decide(receipts.map((r, i) => ({ ref: r.ref, changeIds: r.changeIds, decision: keep[i]! })));
+        const fin = doc.save();
+        const label = keep.join("/");
+        expect(openDocument(fin).projection().map((p) => p.text), label)
+          .toEqual([...before, "Anchor.", ...texts.filter((_, i) => keep[i] === "accept"), ...after]);
+        const xml = xmlOf(fin);
+        expect(xml, label).not.toContain("Reviewer");
+        expect(xml.slice(xml.lastIndexOf("<w:p ", xml.indexOf("Anchor.")), xml.indexOf("Anchor.")), label).toContain('<w:pStyle w:val="Heading1"/>');
+      }
+    });
+  });
+
   it("an insert directly before a table uses the anchor-mark form", () => {
     const body = P("10000001", R("Before the table.")) + `<w:tbl><w:tr><w:tc>${P("10000002", R("Cell."))}</w:tc></w:tr></w:tbl>`;
     const { receipts, out } = runOn(body, [insert("10000001", "Between.")]);
