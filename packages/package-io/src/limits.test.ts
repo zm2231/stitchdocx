@@ -72,6 +72,20 @@ describe("archive limits", () => {
     expect(refused(() => openPackage(zip))).toBe("package_too_large");
   });
 
+  it("ZIP64 records whose lengths overrun their enclosing record are unreadable", () => {
+    const zip = toZip64(writePackage(sample()));
+    const v = new DataView(zip.buffer);
+    const eocd64 = Number(v.getBigUint64(zip.length - 22 - 20 + 8, true));
+    const cd = Number(v.getBigUint64(eocd64 + 48, true));
+    const nameLen = v.getUint16(cd + 28, true);
+    const overlong = zip.slice();
+    new DataView(overlong.buffer).setUint16(cd + 46 + nameLen + 2, 0xffff, true);
+    expect(refused(() => openPackage(overlong))).toBe("unreadable_archive");
+    const undersized = zip.slice();
+    new DataView(undersized.buffer).setBigUint64(eocd64 + 4, 20n, true);
+    expect(refused(() => openPackage(undersized))).toBe("unreadable_archive");
+  });
+
   it("an entry that inflates past its recorded size is unreadable, not inflated in full", () => {
     const content = new Uint8Array(1_000_000).fill(65);
     const lying = new RawEntry(deflateSync(content), 8, 0, 1000);

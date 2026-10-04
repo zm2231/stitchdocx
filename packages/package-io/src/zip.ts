@@ -341,7 +341,9 @@ function readCentralDirectory(data: Uint8Array): CentralEntry[] {
     const loc = eocd - 20;
     if (loc < 0 || view.getUint32(loc, true) !== 0x07064b50) unreadable("ZIP64 locator missing");
     const eocd64 = u64(loc + 8);
-    if (eocd64 + 56 > data.length || view.getUint32(eocd64, true) !== 0x06064b50) unreadable("ZIP64 end of central directory unreadable");
+    if (eocd64 + 56 > loc || view.getUint32(eocd64, true) !== 0x06064b50 || u64(eocd64 + 4) < 44 || eocd64 + 12 + u64(eocd64 + 4) > loc) {
+      unreadable("ZIP64 end of central directory unreadable");
+    }
     count = u64(eocd64 + 32);
     ptr = u64(eocd64 + 48);
   }
@@ -372,6 +374,7 @@ function readCentralDirectory(data: Uint8Array): CentralEntry[] {
       while (at + 4 <= extraStart + extraLen) {
         const tag = view.getUint16(at, true);
         const len = view.getUint16(at + 2, true);
+        if (at + 4 + len > extraStart + extraLen) unreadable(`central directory entry ${n} has an extra field longer than its extra area`);
         if (tag === 0x0001) {
           let f = at + 4;
           const end = f + len;
