@@ -401,3 +401,19 @@ describe("AlternateContent branches and office math are listed but locked (F17, 
     ]);
   });
 });
+
+describe("text that reads empty occupies no offset (fuzz find)", () => {
+  it("lone unpreserved spaces between runs neither list nor offset", () => {
+    const body =
+      P("10000001", `<w:r><w:t xml:space="preserve">Action/to</w:t></w:r><w:r><w:t> </w:t></w:r><w:r><w:t xml:space="preserve">do</w:t></w:r><w:r><w:t> </w:t></w:r><w:r><w:t xml:space="preserve">list</w:t></w:r>`);
+    const doc = openDocument(docx(body));
+    expect(doc.projection().map((p) => p.text)).toEqual(["Action/todolist"]);
+    const { receipts, out, norm } = runApply(body, [
+      { op: "replace", ref: "f", author: AUTHOR, addr: "10000001", start: 0, end: 15, expectText: "Action/todolist", text: "net-30" },
+    ]);
+    expect(receipts[0]!.status).toBe("applied");
+    expect(openDocument(out).projectionRecords((r) => (r.author === AUTHOR ? "accept" : "accept")).map((p) => p.text)).toEqual(["net-30"]);
+    expect(openDocument(out).projectionRecords((r) => (r.author === AUTHOR ? "reject" : "accept")).map((p) => p.text)).toEqual(["Action/todolist"]);
+    expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+  });
+});

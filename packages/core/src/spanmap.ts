@@ -50,7 +50,9 @@ export function buildSpanMap(p: XElement, view: View, fields: string[] = []): Sp
       if (!runInfo.has(run)) runInfo.set(run, ancestry(run, p));
       const decoded = kind === "text" ? wordText(el) : kind === "sym" ? symChar(el) ?? "" : "";
       if (kind === "sym" && decoded === "") return;
-      const len = decoded.length || 1;
+      // a text piece may read empty (a lone unpreserved space); it occupies
+      // no offset — only 1-char atomics (tab, break, hyphen) reserve one
+      const len = decoded.length || (kind === "text" || kind === "sym" ? 0 : 1);
       pieces.push({
         run,
         el,
