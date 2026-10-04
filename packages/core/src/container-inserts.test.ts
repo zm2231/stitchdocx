@@ -97,16 +97,37 @@ describe("inserted paragraph at the end of a container", () => {
     expect(xml).not.toContain("w:pPrChange");
   });
 
-  it("a chain of inserts tracks anchor and intermediates; only the last carries the pPrChange", () => {
-    const { receipts, out } = runOn(BODY_END, [insert("10000000", "First."), insert("10000000", "Second.")]);
+  it("each insert in a chain tracks the mark before it, so any subset of decisions leaves exactly the kept paragraphs", () => {
+    const body = P("10000001", R("Earlier paragraph.")) + P("10000000", `<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>` + R("Final heading."));
+    const ops: Op[] = [
+      { op: "insertParagraphAfter", ref: "a", author: "Reviewer A", addr: "10000000", text: "First." },
+      { op: "insertParagraphAfter", ref: "b", author: "Reviewer B", addr: "10000000", text: "Second." },
+    ];
+    const { receipts, out } = runOn(body, ops);
     expect(receipts.map((r) => r.status)).toEqual(["applied", "applied"]);
-    expect(receipts[0]!.changeIds).toHaveLength(2);
-    expect(receipts[1]!.changeIds).toHaveLength(3);
-    expect(verifyOutput(normalizeDocx(docx(BODY_END)).docx, out, receipts).ok).toBe(true);
-    const doc = openDocument(out);
-    doc.decide([{ ref: "i", changeIds: idsBy(out, AUTHOR), decision: "reject" }]);
-    const paras = openDocument(doc.save()).projection();
-    expect(paras.map((p) => p.text)).toEqual(["Earlier paragraph.", "Final heading."]);
+    expect(receipts.map((r) => r.changeIds.length)).toEqual([3, 3]);
+    expect(verifyOutput(normalizeDocx(docx(body)).docx, out, receipts).failures).toEqual([]);
+    // the second insert owns the first's mark, not the anchor's
+    expect(paraXml(xmlOf(out), receipts[0]!.insertedAddr!)).toContain('<w:rPr><w:ins w:id="' + receipts[1]!.changeIds[0] + '" w:author="Reviewer B"');
+    for (const [a, b, want] of [
+      ["accept", "accept", ["Earlier paragraph.", "Final heading.", "First.", "Second."]],
+      ["accept", "reject", ["Earlier paragraph.", "Final heading.", "First."]],
+      ["reject", "accept", ["Earlier paragraph.", "Final heading.", "Second."]],
+      ["reject", "reject", ["Earlier paragraph.", "Final heading."]],
+    ] as const) {
+      const doc = openDocument(out);
+      doc.decide([
+        { ref: "a", changeIds: receipts[0]!.changeIds, decision: a },
+        { ref: "b", changeIds: receipts[1]!.changeIds, decision: b },
+      ]);
+      const fin = doc.save();
+      expect(openDocument(fin).projection().map((p) => p.text), `${a}/${b}`).toEqual(want);
+      const xml = xmlOf(fin);
+      expect(xml).not.toContain("Reviewer");
+      // wherever the anchor's text lands, it has the anchor's properties
+      const heading = xml.slice(xml.lastIndexOf("<w:p ", xml.indexOf("Final heading.")), xml.indexOf("Final heading."));
+      expect(heading, `${a}/${b}`).toContain('<w:pStyle w:val="Heading1"/>');
+    }
   });
 
   it("an insert directly before a table uses the anchor-mark form", () => {

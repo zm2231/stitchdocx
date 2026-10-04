@@ -272,12 +272,17 @@ export function resolveRevisions(root: XElement, match: (rev: XElement) => boole
         removeChild(t);
       } else {
         // restore the saved props: the marker's element child holds the old
-        // props, which REPLACE the current ones (no merge)
+        // props, which REPLACE the current ones (no merge). A paragraph's saved
+        // props never hold its mark formatting or section break (CT_PPrBase), so
+        // those stay, and with them any tracked change on the mark.
         const saved = t.children.find((c) => c.kind === "el");
         const i = parent.children.indexOf(t);
         if (i >= 0) parent.children.splice(i, 1);
         if (saved) {
-          parent.children = [...saved.children];
+          const kept = t.name === "w:pPrChange"
+            ? parent.children.filter((c) => c.kind === "el" && (c.name === "w:rPr" || c.name === "w:sectPr"))
+            : [];
+          parent.children = [...saved.children, ...kept];
           for (const c of parent.children) if (c.kind === "el") c.parent = parent;
         }
       }

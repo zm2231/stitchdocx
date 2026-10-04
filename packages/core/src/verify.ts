@@ -88,19 +88,24 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
     const ids = new Set((r.changeIds ?? []).map(String));
     const rejectMine: View = (rev) => (rev.id !== null && ids.has(rev.id) ? "reject" : "accept");
     if (r.insertedAddr) {
-      const rejRecords = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles, new Set([r.insertedAddr, r.addr]));
+      // Word's container-end form tracks the mark of the paragraph just before
+      // the insert: the anchor, or the previous insert of the same chain
+      const at = outRecords.findIndex((rec) => rec.addr === r.insertedAddr);
+      const before = at > 0 ? outRecords[at - 1]! : null;
+      const beforeAddr = before?.addr ?? r.addr;
+      const rejRecords = projectParagraphs(outDoc.walk, rejectMine, outDoc.styles, new Set([r.insertedAddr, beforeAddr]));
       const rejByAddr = new Map<string, (typeof rejRecords)[number]>();
       for (const rec of rejRecords) if (rec.addr) rejByAddr.set(rec.addr, rec);
       const rejected = rejByAddr.get(r.insertedAddr);
       if (rejected && rejected.text !== "") {
-        // Word's container-end form: the tracked insertion sits on the
-        // anchor's mark, so rejecting merges the anchor paragraph into the
-        // inserted one — which must read exactly like the anchor did
-        if (rejected.text !== (r.before ?? "")) {
-          failures.push(`receipt ${r.index}: rejected insert reads ${JSON.stringify(rejected.text)}, expected ${JSON.stringify(r.before ?? "")}`);
+        // rejecting merges that paragraph into the inserted one, which must
+        // then read exactly like it did
+        const expected = before?.text ?? r.before ?? "";
+        if (rejected.text !== expected) {
+          failures.push(`receipt ${r.index}: rejected insert reads ${JSON.stringify(rejected.text)}, expected ${JSON.stringify(expected)}`);
         }
-        if (rejByAddr.get(r.addr)) {
-          failures.push(`receipt ${r.index}: anchor paragraph survives beside the merged insert`);
+        if (rejByAddr.get(beforeAddr)) {
+          failures.push(`receipt ${r.index}: paragraph before the insert survives beside the merged insert`);
         }
       }
       const accepted = outById.get(r.insertedAddr);

@@ -156,22 +156,19 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
   }
   const insertChains = new Map<XElement, XElement>();
   const insertPlans = plans.filter((p) => p.status === "applied" && p.op.op === "insertParagraphAfter");
-  // decided up front against the pristine tree: the last insert per anchor
-  // ends its chain, and whether a paragraph follows the chain decides the
-  // markup form (inside the loop the tree is already mutating)
-  const chainEndPlan = new Map<XElement, Plan>();
+  // decided up front against the pristine tree: whether a paragraph follows
+  // the chain decides the markup form (inside the loop the tree is already
+  // mutating)
   const chainFollowsParagraph = new Map<XElement, boolean>();
   for (const plan of insertPlans) {
     const op = plan.op as Extract<Op, { op: "insertParagraphAfter" }>;
     const key = chainKeyOf(op, deps.paraByAddr.get(op.addr)!);
-    chainEndPlan.set(key, plan);
     if (!chainFollowsParagraph.has(key)) chainFollowsParagraph.set(key, nextBlockSibling(key)?.name === "w:p");
   }
   for (const plan of insertPlans) {
     const op = plan.op as Extract<Op, { op: "insertParagraphAfter" }>;
     const key = chainKeyOf(op, deps.paraByAddr.get(op.addr)!);
     const { insertedAddr, ids, element } = applyInsertParagraph(deps, op, insertChains, {
-      chainEnd: chainEndPlan.get(key) === plan,
       followsParagraph: chainFollowsParagraph.get(key)!,
     });
     insertedAddrByIndex.set(plan.index, insertedAddr);
@@ -451,20 +448,22 @@ function applyInsertParagraph(
   deps: ApplyDeps,
   op: Extract<Op, { op: "insertParagraphAfter" }>,
   chains: Map<XElement, XElement>,
-  form: { chainEnd: boolean; followsParagraph: boolean },
+  form: { followsParagraph: boolean },
 ): { insertedAddr: string; ids: string[]; element: XElement } {
   const anchor = deps.paraByAddr.get(op.addr)!;
   const chainKey = chainKeyOf(op, anchor);
   const effectiveAfter = chains.get(chainKey) ?? chainKey;
   const author = op.author;
 
-  // Word's container-end form: no paragraph follows the chain, so the anchor's
-  // own mark is the tracked insertion and the last new paragraph keeps an
-  // untracked mark plus a w:pPrChange recording the anchor's original
-  // properties. Rejecting the pair restores the anchor exactly. (After a
-  // table there is no anchor mark to track — the mark rides on the new
-  // paragraph, whose removal Word cannot reject either.)
-  const anchorMarkForm = form.chainEnd && !form.followsParagraph && chainKey.name === "w:p";
+  // Word's container-end form, as typing at the end of a document makes it: no
+  // paragraph follows the chain, so each insert tracks the mark of the
+  // paragraph before it (the anchor's for the first) and keeps an untracked
+  // mark plus a w:pPrChange recording the anchor's original properties. Any
+  // subset of rejects then removes exactly the rejected paragraphs, and the
+  // anchor's text always lands on a paragraph restored to its properties.
+  // (After a table there is no anchor mark to track — the mark rides on the
+  // new paragraph, whose removal Word cannot reject either.)
+  const anchorMarkForm = !form.followsParagraph && chainKey.name === "w:p";
 
   const p = el("w:p");
   const ids: string[] = [];
@@ -500,7 +499,7 @@ function applyInsertParagraph(
     pPr.parent = p;
 
     markIns = newRevisionEl("w:ins", markId, author, deps.date);
-    addParagraphMarkIns(anchor, markIns);
+    addParagraphMarkIns(effectiveAfter, markIns);
     deps.ownedRevisions.add(markIns);
   } else {
     const markId = deps.ids.take();
