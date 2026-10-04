@@ -6,7 +6,7 @@ import { acceptAllDocx, normalizeDocx, openDocument } from "./index.js";
 
 const NS = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14"`;
 const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-const ANY_REVISION = /<w:(ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange|tblPrChange|trPrChange|tcPrChange|tblGridChange|numberingChange|cellIns|cellDel|cellMerge|moveFromRangeStart|moveFromRangeEnd|moveToRangeStart|moveToRangeEnd)[\s/>]/;
+const ANY_REVISION = /<w:(ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange|tblPrChange|trPrChange|tcPrChange|tblGridChange|numberingChange|cellIns|cellDel|cellMerge|moveFromRangeStart|moveFromRangeEnd|moveToRangeStart|moveToRangeEnd|customXml(?:Ins|Del|MoveFrom|MoveTo)Range(?:Start|End))[\s/>]/;
 
 let nextId = 100;
 const rev = (name: string) => `<w:${name} w:id="${nextId++}" w:author="Client" w:date="2026-10-01T00:00:00Z"/>`;
@@ -96,6 +96,41 @@ describe("acceptAllDocx", () => {
     const bytes = docx(body);
     expect(acceptAll(bytes)).toEqual(["c", "d", "End"]);
     expect(partXml(acceptAllDocx(bytes), "word/document.xml").match(/<w:tbl>/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ["a content control", (row: string) => `<w:sdt><w:sdtPr/><w:sdtContent>${row}</w:sdtContent></w:sdt>`],
+    ["custom XML", (row: string) => `<w:customXml w:element="row">${row}</w:customXml>`],
+  ])("removes a row wrapped in %s, and the table it empties", (_, wrap) => {
+    const nested = (rowRev: string) => TBL(wrap(TR([TC(P(R("inner"))), TC(P(R("cell")))], rowRev)));
+    const accepted = docx(TBL(TR([TC(P(R("outer")) + nested("del")), TC(P(R("x")))])) + TBL(wrap(TR([TC(P(R("gone"))), TC(P(R("row")))], "del"))) + P(R("End")));
+    expect(acceptAll(accepted)).toEqual(["outer", "x", "End"]);
+    const xml = partXml(acceptAllDocx(accepted), "word/document.xml");
+    expect(xml.match(/<w:tbl>/g)).toHaveLength(1);
+    expect(xml).not.toMatch(/<w:(sdt|customXml)\b/);
+    expect(xml.match(/<\/w:tc>/g)!.length).toBe(xml.match(/<\/w:p><\/w:tc>/g)!.length);
+
+    const rejected = docx(TBL(wrap(TR([TC(P(R("added"))), TC(P(R("row")))], "ins"))) + P(R("End")));
+    const id = /<w:ins w:id="(\d+)"/.exec(partXml(rejected, "word/document.xml"))![1]!;
+    const doc = openDocument(rejected);
+    doc.decide([{ ref: "row", changeIds: [id], decision: "reject" }]);
+    const out = partXml(doc.save(), "word/document.xml");
+    expect(out).not.toMatch(/<w:(tbl|sdt|customXml)\b/);
+    expect(texts(doc.save())).toEqual(["End"]);
+  });
+
+  it("clears custom XML revision ranges in the body and a header", () => {
+    const W = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"`;
+    const ranges = ["Ins", "Del", "MoveFrom", "MoveTo"].map((k) => `<w:customXml${k}RangeStart w:id="${nextId++}" w:author="Client"/><w:customXml${k}RangeEnd w:id="${nextId++}"/>`).join("");
+    const parts = { "word/header1.xml": { xml: `<w:hdr ${W}>${ranges}${P(R("Header"))}</w:hdr>`, type: "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml", rel: "header" } };
+    const bytes = docx(P(ranges + R("Body")) + ranges + P(R("End")), parts);
+    expect(acceptAll(bytes)).toEqual(["Body", "End"]);
+    expect(partXml(acceptAllDocx(bytes), "word/header1.xml")).not.toMatch(ANY_REVISION);
+  });
+
+  it("returns the input itself when nothing is tracked", () => {
+    const bytes = docx(P(R("Clean")) + TBL(TR([TC(P(R("a"))), TC(P(R("b")))])));
+    expect(acceptAllDocx(bytes)).toBe(bytes);
   });
 
   it("accepts in headers and footnotes, and clears cell, numbering and grid changes", () => {

@@ -269,7 +269,7 @@ export class Document {
   acceptAllChanges(): void {
     this.assertUsable();
     for (const p of [...pendingElements(this.root)]) if (TRACKED.test(pendingSource(p)!)) materialize(p);
-    acceptEverything(this.root);
+    let accepted = acceptEverything(this.root);
     this.walk = walkBody(this.root);
     this.paraByAddr = new Map();
     for (const p of this.walk.paragraphs) {
@@ -282,10 +282,11 @@ export class Document {
       const tree = parsePart(source);
       const partRoot = kid(treeAsEl(tree));
       if (!partRoot) continue;
-      acceptEverything(partRoot);
+      if (acceptEverything(partRoot) === 0) continue;
       this.entries.set(part, encodePart(serializeXml(tree)));
+      accepted++;
     }
-    this.markDirty();
+    if (accepted > 0) this.markDirty();
   }
 
   private broken: string | null = null;
@@ -448,16 +449,16 @@ function removeChildEl(parent: XElement, child: XElement): void {
 }
 
 /** source that may hold a tracked change of any kind */
-const TRACKED = new RegExp(`<(?:${[...REVISION_ID_NAMES, "w:tblGridChange"].join("|")})[\\s/>]`);
+const TRACKED = new RegExp(`<(?:${[...REVISION_ID_NAMES].join("|")})[\\s/>]`);
 
-/** accept every tracked change under a fully parsed `root` */
-function acceptEverything(root: XElement): void {
-  resolveRevisions(root, () => true, "accept");
+/** accept every tracked change under `root`; returns how many there were */
+function acceptEverything(root: XElement): number {
+  const resolved = resolveRevisions(root, () => true, "accept");
   const leftovers: XElement[] = [];
   const visit = (node: XElement): void => {
     for (const c of node.children) {
       if (c.kind !== "el") continue;
-      if (REVISION_ID_NAMES.has(c.name) || c.name === "w:tblGridChange") leftovers.push(c);
+      if (REVISION_ID_NAMES.has(c.name)) leftovers.push(c);
       else if (isPending(c)) continue; // its source holds no tracked change
       else visit(c);
     }
@@ -470,6 +471,7 @@ function acceptEverything(root: XElement): void {
     }
     if (rev.parent) removeChildEl(rev.parent, rev);
   }
+  return resolved + leftovers.length;
 }
 
 /** revision elements outside unparsed paragraphs */
@@ -500,7 +502,8 @@ export function finalizeDocx(bytes: Uint8Array, decisions: Decision[]): { docx: 
   return { docx: doc.save(), results };
 }
 
-/** The document with every tracked change accepted, in every story part. */
+/** The document with every tracked change accepted, in every story part;
+ *  the input itself when it holds none. */
 export function acceptAllDocx(bytes: Uint8Array): Uint8Array {
   const doc = Document.open(bytes);
   doc.acceptAllChanges();

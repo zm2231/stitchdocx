@@ -32,6 +32,15 @@ export const REVISION_ID_NAMES = new Set([
   "w:moveFromRangeEnd",
   "w:moveToRangeStart",
   "w:moveToRangeEnd",
+  "w:tblGridChange",
+  "w:customXmlInsRangeStart",
+  "w:customXmlInsRangeEnd",
+  "w:customXmlDelRangeStart",
+  "w:customXmlDelRangeEnd",
+  "w:customXmlMoveFromRangeStart",
+  "w:customXmlMoveFromRangeEnd",
+  "w:customXmlMoveToRangeStart",
+  "w:customXmlMoveToRangeEnd",
 ]);
 
 export function isRevisionEl(e: XElement): boolean {
@@ -485,20 +494,29 @@ function hasAcceptedText(para: XElement): boolean {
   return visit(para);
 }
 
-/** remove a table row; a table left without rows goes too, and a cell left
- *  without a closing paragraph gets an empty one */
+/** remove a table row, with any row wrapper it leaves empty; a table left
+ *  without rows goes too, and a cell left without a closing paragraph gets an
+ *  empty one */
 function removeRow(tr: XElement): void {
-  const tbl = tr.parent;
+  let holder = tr.parent;
   removeChild(tr);
-  if (!tbl || tbl.name !== "w:tbl" || rowsOf(tbl).length > 0) return;
-  const holder = tbl.parent;
+  while (holder && holder.name !== "w:tbl") {
+    const wrapper = holder.name === "w:sdtContent" ? holder.parent : holder;
+    if (!wrapper || (wrapper.name !== "w:sdt" && wrapper.name !== "w:customXml")) return;
+    const up = wrapper.parent;
+    if (rowsOf(holder).length === 0) removeChild(wrapper);
+    holder = up;
+  }
+  const tbl = holder;
+  if (!tbl || rowsOf(tbl).length > 0) return;
+  const cell = tbl.parent;
   removeChild(tbl);
-  if (holder?.name === "w:tc") {
-    const last = [...holder.children].reverse().find((c) => c.kind === "el");
+  if (cell?.name === "w:tc") {
+    const last = [...cell.children].reverse().find((c) => c.kind === "el");
     if (!last || last.kind !== "el" || last.name !== "w:p") {
       const p = el("w:p", {});
-      p.parent = holder;
-      holder.children.push(p);
+      p.parent = cell;
+      cell.children.push(p);
     }
   }
 }
