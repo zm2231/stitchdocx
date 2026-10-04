@@ -35,6 +35,15 @@ rewriting the stored file.
 { "paragraphs": [ { "addr": "00000001", "text": "…", "kind": "body", "editable": true } ] }
 ```
 
+`editable` is `false` (with `readOnlyReason: "merged_removed_mark"`) for
+display-only records whose text was carried across a removed paragraph mark —
+for example a deleted heading merged into the first cell of the table that
+followed it. Their text is what Word shows on reject, but their offsets span
+more than one physical paragraph, so skip them when deriving operations; the
+resolver and `apply` refuse such spans with `paragraph_not_editable`. The
+underlying paragraphs keep their own addresses and are editable in their own
+coordinates.
+
 ### `apply <in.docx> <ops.json> <out.docx>`
 
 `ops.json` is `{ "date": "<ISO timestamp stamped on every revision>", "ops": [...] }`.
@@ -49,7 +58,8 @@ Ops (all require `flagId`, `author`, `addr`):
   `"scope": "table"`).
 
 Spans are in the paragraph's original text coordinates and must match
-`expectText` exactly. Output is `{ "receipts": [...] }`; each receipt reports
+`expectText` exactly — address only records listed with `editable: true`
+(see `paragraphs`). Output is `{ "receipts": [...] }`; each receipt reports
 `index`, `flagId`, `author`, `status` (`applied`/`refused`), `addr`,
 `changeIds` (the `w:id`s the op wrote), and for applied ops `before`/`after`
 paragraph text and `insertedAddr`.
