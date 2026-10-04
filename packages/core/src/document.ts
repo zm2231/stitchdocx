@@ -23,12 +23,12 @@ import {
 import { walkBody, type BodyWalk } from "./body.js";
 import { acceptAll, attrVal, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
 import { buildSpanMap } from "./spanmap.js";
-import { descendantsOf, executeApply, splitAt, type ApplyDeps } from "./ops.js";
-import { cloneRunPr, isPairedInsertParagraph, ParaIdAllocator, renameEl, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun, unwrap } from "./revisions.js";
+import { executeApply, splitAt, type ApplyDeps } from "./ops.js";
+import { cloneRunPr, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
 import { NumberingModel, parseNumberingModel } from "./numbering.js";
 import { otherPartRoots, paraIdsAcrossParts } from "./parts.js";
-import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
+import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt } from "./types.js";
 
 /** the parsed document root is an XDoc; kid() works on it identically */
 const treeAsEl = (d: unknown) => d as XElement;
@@ -197,193 +197,164 @@ export class Document {
   }
 
   /**
-   * Pure accept/reject of revisions, by changeIds or by author
-   * (research/04 §3). Returns one result per decision with the change ids it
-   * resolved. The model must be saved by the caller.
+   * Resolve each decision's revisions, named by the receipt's changeIds.
+   * Throws, naming the decision, when an id is not a revision in the
+   * document, when two decisions name the same id, or when accept-with-wording
+   * cannot place the member's text. A throw leaves this Document partly
+   * decided; finalizeDocx discards it and writes nothing.
    */
-  decide(decisions: RevisionDecision[]): DecisionResult[] {
-    return decisions.map((d, index): DecisionResult => {
-      const matched = [...allRevisions(this.root)].filter((rev) => {
-        if ("changeIds" in d) {
-          const id = getAttr(rev, "w:id");
-          return id !== null && d.changeIds.includes(id);
-        }
-        return getAttr(rev, "w:author") === d.author;
-      });
-      const ids = matched.map((rev) => getAttr(rev, "w:id") ?? "").filter((s) => s !== "");
-      const resolved = resolveRevisions(this.root, (rev) => matched.includes(rev), d.decision);
-      if (resolved > 0) this.markDirty();
-      return { index, decision: d.decision, changeIds: ids };
+  decide(decisions: Decision[]): DecisionResult[] {
+    const byId = new Map<string, XElement[]>();
+    for (const rev of allRevisions(this.root)) {
+      const id = getAttr(rev, "w:id");
+      if (id !== null) byId.set(id, [...(byId.get(id) ?? []), rev]);
+    }
+    const claimed = new Map<string, number>();
+    decisions.forEach((d, index) => {
+      if (d.changeIds.length === 0) throw new Error(`decision ${index} (${d.ref}) names no changeIds`);
+      if (d.text !== undefined && d.decision !== "accept") throw new Error(`decision ${index} (${d.ref}) gives text with a reject`);
+      for (const id of d.changeIds) {
+        if (!byId.has(id)) throw new Error(`decision ${index} (${d.ref}) names change ${id}, which is not a revision in the document`);
+        const prior = claimed.get(id);
+        if (prior !== undefined) throw new Error(`decisions ${prior} and ${index} both name change ${id}`);
+        claimed.set(id, index);
+      }
     });
+    const results = decisions.map((d, index): DecisionResult => {
+      const matched = new Set(d.changeIds.flatMap((id) => byId.get(id) ?? []));
+      if (d.text === undefined) resolveRevisions(this.root, (rev) => matched.has(rev), d.decision);
+      else this.acceptWithText(d, index, matched);
+      return { index, ref: d.ref, decision: d.decision, changeIds: [...d.changeIds] };
+    });
+    if (results.length > 0) this.markDirty();
+    return results;
   }
 
   /**
-   * accept-with-caller-wording: the flagged span reads as the original with
-   * the caller's text in place of our revision. Tree-level, exact: removes our
-   * insertions, replaces the first deleted segment with the caller's wording,
-   * and drops any further deleted segments.
+   * Accept with the member's wording: the document reads as the original with
+   * the flagged span (or the inserted paragraph) replaced by the text, untracked.
    */
-  acceptWithText(decision: Decision): number {
-    if (decision.text === undefined) return 0;
-    let touched = 0;
-    const byParagraph = new Map<XElement, { ins: XElement[]; dels: XElement[]; markIns: XElement | null }>();
-    // a decision names either the receipt's change ids or (legacy) an author
-    const changeIdSet = decision.changeIds ? new Set(decision.changeIds) : null;
-    const matched = [...allRevisions(this.root)].filter((rev) =>
-      changeIdSet ? changeIdSet.has(getAttr(rev, "w:id") ?? "") : getAttr(rev, "w:author") === decision.author,
-    );
-    const author = decision.author ?? (matched[0] ? getAttr(matched[0], "w:author") : null) ?? "";
+  private acceptWithText(d: Decision, index: number, matched: ReadonlySet<XElement>): void {
+    const isMark = (rev: XElement) => rev.parent?.name === "w:rPr" && rev.parent.parent?.name === "w:pPr";
+    if ([...matched].some((rev) => rev.name === "w:ins" && isMark(rev))) {
+      this.acceptInsertWithText(d.text!, matched);
+      return;
+    }
+    if (d.expectText === undefined) throw new Error(`decision ${index} (${d.ref}) accepts with wording but gives no expectText`);
+    const paragraphs = new Set([...matched].map((rev) => this.paragraphOf(rev)));
+    if (paragraphs.size !== 1 || paragraphs.has(null)) throw new Error(`decision ${index} (${d.ref}) accepts with wording but its changes are not in one paragraph`);
+    const para = [...paragraphs][0]!;
+
+    // an empty-span replace is a pure insertion: the wording takes its place,
+    // inside whatever holds it (a hyperlink, say)
+    if (d.expectText === "") {
+      const ins = [...matched].filter((rev) => rev.name === "w:ins");
+      if (ins.length !== matched.size) throw new Error(`decision ${index} (${d.ref}): expectText is empty but the change deletes text`);
+      this.replaceInsertions(ins, d.text!);
+      return;
+    }
+
+    // where this decision's changes sit, in the paragraph's text with them
+    // rejected: a deletion covers its characters, an insertion is a point
+    const ids = new Set([...matched].map((m) => getAttr(m, "w:id")));
+    const showOurs: View = (rev) => (ids.has(rev.id) && (rev.name === "w:del" || rev.name === "w:moveFrom") ? "reject" : "accept");
+    const shown = buildSpanMap(para, showOurs);
+    let pos = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const pc of shown.pieces) {
+      const rev = shown.runInfo.get(pc.run)?.rev ?? null;
+      const len = pc.end - pc.start;
+      if (rev && matched.has(rev) && (rev.name === "w:ins" || rev.name === "w:moveTo")) {
+        lo = Math.min(lo, pos);
+        hi = Math.max(hi, pos);
+        continue;
+      }
+      if (rev && matched.has(rev)) {
+        lo = Math.min(lo, pos);
+        hi = Math.max(hi, pos + len);
+      }
+      pos += len;
+    }
+    if (lo === Infinity) throw new Error(`decision ${index} (${d.ref}) accepts with wording but none of its changes is visible text`);
+
+    resolveRevisions(this.root, (rev) => matched.has(rev), "reject");
+
+    const text = paragraphText(para, acceptAll);
+    const want = d.expectText;
+    const starts: number[] = [];
+    for (let at = text.indexOf(want); at >= 0; at = text.indexOf(want, at + 1)) {
+      if (at <= lo && at + want.length >= hi) starts.push(at);
+    }
+    if (starts.length !== 1) {
+      throw new Error(`decision ${index} (${d.ref}): expectText ${JSON.stringify(want)} covers its changes ${starts.length === 0 ? "nowhere" : `${starts.length} times`} in the paragraph`);
+    }
+    this.replacePlain(para, starts[0]!, starts[0]! + want.length, d.text!, index, d.ref);
+  }
+
+  /** replace [start,end) of the paragraph's text with `text` as one plain run
+   *  carrying the formatting of the span's first run */
+  private replacePlain(para: XElement, start: number, end: number, text: string, index: number, ref: string): void {
+    const take = () => this.ids.take();
+    splitAt(buildSpanMap(para, acceptAll), start, take);
+    splitAt(buildSpanMap(para, acceptAll), end, take);
+    const map = buildSpanMap(para, acceptAll);
+    const inside = (pc: (typeof map.pieces)[number]) =>
+      pc.end > pc.start ? pc.start >= start && pc.end <= end : pc.start > start && pc.start < end;
+    const runs: XElement[] = [];
+    for (const pc of map.pieces) if (inside(pc) && !runs.includes(pc.run)) runs.push(pc.run);
+    for (const r of runs) {
+      if (map.runInfo.get(r)?.rev) throw new Error(`decision ${index} (${ref}): the flagged span holds another revision`);
+    }
+    if (new Set(runs.map((r) => r.parent)).size > 1) throw new Error(`decision ${index} (${ref}): the flagged span crosses a structure boundary`);
+    if (runs.length === 0) throw new Error(`decision ${index} (${ref}): the flagged span holds no runs`);
+    const parent = runs[0]!.parent!;
+    const at = parent.children.indexOf(runs[0]!);
+    const rPr = cloneRunPr(runs[0]!);
+    for (const r of runs) parent.children.splice(parent.children.indexOf(r), 1);
+    if (text === "") return;
+    const run = makeRun(rPr, textToRunChildren(text));
+    parent.children.splice(at, 0, run);
+    run.parent = parent;
+  }
+
+  /** put `text` as one plain run where the first insertion sits, with its
+   *  formatting, and drop the insertions */
+  private replaceInsertions(ins: XElement[], text: string): void {
+    const first = ins[0]!;
+    const parent = first.parent!;
+    const at = parent.children.indexOf(first);
+    const runPr = cloneRunPr(kid(first, "w:r") ?? null);
+    for (const i of ins) if (i.parent) removeChildEl(i.parent, i);
+    const run = makeRun(runPr, textToRunChildren(text));
+    parent.children.splice(Math.min(at, parent.children.length), 0, run);
+    run.parent = parent;
+  }
+
+  /** accept-with-wording for an inserted paragraph: the inserted paragraph
+   *  keeps its place and reads `text`, untracked */
+  private acceptInsertWithText(text: string, matched: ReadonlySet<XElement>): void {
+    const byParagraph = new Map<XElement, { ins: XElement[]; markIns: XElement | null; pPrChange: XElement | null }>();
     for (const rev of matched) {
-      const paragraph = this.paragraphOf(rev);
-      if (!paragraph) continue;
-      const rec = byParagraph.get(paragraph) ?? { ins: [], dels: [], markIns: null };
-      if (rev.name === "w:del") rec.dels.push(rev);
-      else if (rev.name === "w:ins") {
-        const pPr = kid(paragraph, "w:pPr");
-        const rPr = pPr ? kid(pPr, "w:rPr") : undefined;
-        if (rPr && rev.parent === rPr) rec.markIns = rev;
-        else rec.ins.push(rev);
-      }
-      byParagraph.set(paragraph, rec);
-    }
-    // container-end insert pairs: an anchor paragraph with our tracked mark
-    // whose next paragraph is the paired inserted half (isPairedInsertParagraph).
-    // Only those paired paragraphs' w:pPrChange records belong to this edit.
-    const paired = new Set<XElement>();
-    for (const [para, rec] of byParagraph) {
-      if (!rec.markIns) continue;
-      const next = para.parent?.children[para.parent.children.indexOf(para) + 1];
-      if (next && next.kind === "el" && next.name === "w:p" && isPairedInsertParagraph(next, author)) {
-        paired.add(next);
-      }
+      const para = this.paragraphOf(rev);
+      if (!para) continue;
+      const rec = byParagraph.get(para) ?? { ins: [], markIns: null, pPrChange: null };
+      if (rev.name === "w:ins" && rev.parent?.name === "w:rPr" && rev.parent.parent?.name === "w:pPr") rec.markIns = rev;
+      else if (rev.name === "w:ins") rec.ins.push(rev);
+      else if (rev.name === "w:pPrChange") rec.pPrChange = rev;
+      byParagraph.set(para, rec);
     }
     for (const [para, rec] of byParagraph) {
-      if (rec.markIns && rec.ins.length === 0) {
-        // container-end insert form (Word's): the tracked mark sits on the
-        // ANCHOR paragraph and the inserted paragraph follows it with a
-        // w:pPrChange. Accepting the wording restores the anchor by just
-        // removing the mark; the inserted paragraph is handled by its own
-        // record below.
-        const pPr = kid(para, "w:pPr");
-        const rPrEl = pPr ? kid(pPr, "w:rPr") : undefined;
-        if (rPrEl) {
-          const mark = kids(rPrEl).find((c) => REVISION_NAMES.has(c.name));
-          if (mark) removeChildEl(rPrEl, mark);
-          if (rPrEl.children.length === 0 && pPr) removeChildEl(pPr, rPrEl);
-        }
-        touched++;
-        continue;
-      }
+      // the anchor of Word's container-end form carries only our mark
       if (rec.markIns) {
-        // our inserted paragraph: strip the marks, put the caller's text in plain runs
-        const firstIns = rec.ins[0];
-        const rPr = firstIns ? cloneRunPr(firstIns) : null;
-        let insertAt = para.children.length;
-        for (const ins of rec.ins) {
-          const i = para.children.indexOf(ins);
-          if (i >= 0) {
-            if (insertAt === para.children.length) insertAt = i;
-            para.children.splice(i, 1);
-          } else if (ins.parent) removeChildEl(ins.parent, ins);
-        }
-        const run = makeRun(rPr, textToRunChildren(decision.text!));
-        para.children.splice(insertAt, 0, run);
-        run.parent = para;
-        const pPr = kid(para, "w:pPr");
-        const rPrEl = pPr ? kid(pPr, "w:rPr") : undefined;
-        if (rPrEl) {
-          const mark = kids(rPrEl).find((c) => REVISION_NAMES.has(c.name));
-          if (mark) removeChildEl(rPrEl, mark);
-        }
-        touched++;
-        continue;
+        const rPr = rec.markIns.parent!;
+        removeChildEl(rPr, rec.markIns);
+        const pPr = rPr.parent;
+        if (rPr.children.length === 0 && pPr) removeChildEl(pPr, rPr);
       }
-      // insertion-only edits (empty-span replace): the caller's wording takes the
-      // insertion's place, in the insertion's own parent (which may be a
-      // hyperlink rather than the paragraph)
-      if (rec.dels.length === 0 && rec.ins.length > 0) {
-        const anchored = rec.ins[0]!;
-        const parent = anchored.parent ?? para;
-        const rPr = cloneRunPr(anchored);
-        let insertAt = parent.children.indexOf(anchored);
-        if (insertAt < 0) insertAt = parent.children.length;
-        for (const ins of rec.ins) {
-          const holder = ins.parent ?? para;
-          const i = holder.children.indexOf(ins);
-          if (i >= 0) holder.children.splice(i, 1);
-        }
-        const run = makeRun(rPr, textToRunChildren(decision.text!));
-        parent.children.splice(Math.min(insertAt, parent.children.length), 0, run);
-        run.parent = parent;
-        // a paired container-end insert records the anchor's original
-        // paragraph properties in a w:pPrChange; with the wording in place
-        // that record is resolved too. An unrelated same-author property
-        // change in any other paragraph is left alone.
-        if (paired.has(para)) {
-          const pPr = kid(para, "w:pPr");
-          const change = pPr ? kids(pPr).find((c) => c.name === "w:pPrChange" && getAttr(c, "w:author") === author) : undefined;
-          if (change && pPr) removeChildEl(pPr, change);
-        }
-        touched++;
-        continue;
-      }
-      // replace/delete: the caller's wording replaces the whole span the op
-      // changed — every deleted segment, the unchanged words between them
-      // included — with the member's text as one run. The span is recovered
-      // from the paragraph itself: rejecting this decision's revisions reads
-      // the original, accepting them reads the replacement, and what remains
-      // after trimming the common head and tail is exactly the region the op
-      // changed.
-      const idSet = new Set(matched.map((rev) => getAttr(rev, "w:id") ?? ""));
-      const rejectThis: View = (rev) => (rev.id !== null && idSet.has(rev.id) ? "reject" : "accept");
-      const originalText = paragraphText(para, rejectThis);
-      const replacedText = paragraphText(para, acceptAll);
-      let start = 0;
-      while (start < originalText.length && start < replacedText.length && originalText[start] === replacedText[start]) start++;
-      let end = originalText.length;
-      let replEnd = replacedText.length;
-      while (end > start && replEnd > start && originalText[end - 1] === replacedText[replEnd - 1]) {
-        end--;
-        replEnd--;
-      }
-      for (const ins of rec.ins) {
-        const i = para.children.indexOf(ins);
-        if (i >= 0) para.children.splice(i, 1);
-        else if (ins.parent) removeChildEl(ins.parent, ins);
-      }
-      for (const del of rec.dels) {
-        for (const d of descendantsOf(del)) if (d.name === "w:delText") renameEl(d, "w:t");
-        unwrap(del);
-      }
-      if (end > start) {
-        // the paragraph now reads exactly `originalText`; strike [start,end)
-        // plainly (the wording is accepted, not tracked) and drop the
-        // member's text in as one run
-        let map = buildSpanMap(para, acceptAll);
-        splitAt(map, start, () => this.ids.take());
-        map = buildSpanMap(para, acceptAll);
-        splitAt(map, end, () => this.ids.take());
-        map = buildSpanMap(para, acceptAll);
-        const covered = map.pieces.filter((pc) => pc.start >= start && pc.end <= end);
-        const runs: XElement[] = [];
-        for (const pc of covered) if (!runs.includes(pc.run)) runs.push(pc.run);
-        if (runs.length > 0 && new Set(runs.map((r) => r.parent)).size === 1) {
-          const parent = runs[0]!.parent!;
-          const firstRunPr = cloneRunPr(runs[0]!);
-          const at = parent.children.indexOf(runs[0]!);
-          for (const r of runs) {
-            const i = parent.children.indexOf(r);
-            if (i >= 0) parent.children.splice(i, 1);
-          }
-          const run = makeRun(firstRunPr, textToRunChildren(decision.text!));
-          parent.children.splice(Math.min(at, parent.children.length), 0, run);
-          run.parent = parent;
-        }
-      }
-      touched++;
+      if (rec.ins.length > 0) this.replaceInsertions(rec.ins, text);
+      if (rec.pPrChange?.parent) removeChildEl(rec.pPrChange.parent, rec.pPrChange);
     }
-    if (touched > 0) this.markDirty();
-    return touched;
   }
 
   private paragraphOf(rev: XElement): XElement | null {
@@ -427,6 +398,14 @@ function* allRevisions(root: XElement): Generator<XElement> {
 
 export function openDocument(bytes: Uint8Array): Document {
   return Document.open(bytes);
+}
+
+/** Resolve the member's decisions on a redline. All or nothing: a failing
+ *  decision throws and no document is produced. */
+export function finalizeDocx(bytes: Uint8Array, decisions: Decision[]): { docx: Uint8Array; results: DecisionResult[] } {
+  const doc = Document.open(bytes);
+  const results = doc.decide(decisions);
+  return { docx: doc.save(), results };
 }
 
 export { normalizeDocx };

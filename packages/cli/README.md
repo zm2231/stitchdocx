@@ -47,9 +47,8 @@ coordinates.
 Text that Word does not render or will discard is never a valid edit target:
 complex-field instructions are omitted from `text`, field results (including
 `w:fldSimple` content and everything under a TOC's separate) are listed but
-refused with `span_in_field`, and an AlternateContent branch is listed but
-refused with `span_in_alternate_content`. Office math (`m:oMath`) is listed
-but refused with `span_in_math`. Hidden runs (`w:vanish`, `w:specVanish`,
+refused with `span_in_field`, and AlternateContent branches and office math
+(`m:oMath`) are listed but refused with `span_crosses_structure`. Hidden runs (`w:vanish`, `w:specVanish`,
 `w:webHidden`) are not listed at all, and engine insertions never inherit
 hidden formatting. A table row the client tracked as inserted or deleted is
 shown or dropped per Word's accept/reject rules, and spans inside a tracked
@@ -80,22 +79,23 @@ Refusals carry a machine-readable `reason`: `addr_not_found`,
 `span_out_of_range` (including an offset that would split a surrogate pair),
 `span_text_mismatch`, `empty_text`,
 `span_overlaps_revision`, `span_overlaps_prior_op`, `span_crosses_structure`,
-`span_in_field`, `span_in_content_control`, `span_in_alternate_content`,
-`span_in_math`, `paragraph_not_editable`,
+`span_in_field`, `span_in_content_control`, `paragraph_not_editable`,
 `insert_in_plain_text_control` (a plain-text content control may hold only
 one paragraph).
 
 ### `finalize <in.docx> <decisions.json> <out.docx>`
 
-`decisions.json` is `{ "date"?, "decisions": [{ "flagId", "decision",
-"changeIds"?, "author"?, "text"? }] }`. A decision names the revisions it
-resolves — preferably the receipt's `changeIds`; an `author` alone (legacy)
-resolves every revision authored by exactly that author, and revisions by
-anyone else survive untouched. `changeIds` wins when both are given. A
-decision that matches nothing fails the command. `"text"` accepts-with-
-wording: the whole span the op changed (unchanged words between deleted
-segments included) reads as the given text. Output is
-`{ "results": [{ "flagId", "author", "decision", "resolved" }] }`.
+`decisions.json` is `{ "date"?, "decisions": [{ "flagId", "changeIds",
+"decision", "text"?, "expectText"? }] }`. A decision resolves exactly the
+revisions its `changeIds` name (the receipt's); every other revision survives
+untouched. `"text"` accepts with the member's wording: the op's whole span
+reads as the given text, unchanged words included. For a replace or delete
+the decision also carries the op's `expectText`, which locates that span:
+after rejecting the decision's revisions, it is the one occurrence of
+`expectText` covering all of them. The command fails, writing nothing, when
+a decision names an id that is not a revision in the document, two decisions
+name the same id, or the wording cannot be placed. Output is
+`{ "results": [{ "index", "flagId", "decision", "changeIds" }] }`.
 
 ### `verify <original.docx> <output.docx> <receipts.json>`
 
@@ -106,5 +106,6 @@ and authored by the receipt's author, rejecting one receipt's revisions
 yields its `before`, accepting them yields its `after`, untouched paragraphs
 byte-identical in text, every other package entry byte-identical with none
 added or removed, the main part outside paragraphs canonically identical,
-and a touched paragraph carrying nothing beyond the receipt's own revisions
-— and only `word/document.xml` differs.
+a touched paragraph carrying nothing beyond the receipt's own revisions, an
+inserted paragraph holding nothing outside its revisions but its paragraph
+properties, and no inserted text hidden — and only the main part differs.

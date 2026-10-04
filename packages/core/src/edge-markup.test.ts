@@ -5,7 +5,7 @@
 // limits. Builders construct minimal OOXML packages in-memory.
 import { describe, expect, it } from "vitest";
 import { encodePart, entryBytes, PackageLimitError, readPackage, writePackage } from "@stitchdocx/package-io";
-import { normalizeDocx, openDocument, verifyOutput, type Op } from "./index.js";
+import { finalizeDocx, normalizeDocx, openDocument, verifyOutput, type Op } from "./index.js";
 import { cloneRunPr } from "./revisions.js";
 import { el, kid, textNode } from "@stitchdocx/package-io";
 
@@ -251,9 +251,9 @@ describe("accept-with-wording replaces the whole changed span (F1)", () => {
   const applyWording = (body: string, op: Op, text: string) => {
     const first = runApply(body, [op]);
     expect(first.receipts[0]!.status).toBe("applied");
-    const decided = openDocument(first.out);
-    const touched = decided.acceptWithText({ ref: op.ref, author: op.author, decision: "accept", text });
-    return { touched, out: decided.save() };
+    const expectText = op.op === "insertParagraphAfter" ? undefined : op.expectText;
+    const { docx: out } = finalizeDocx(first.out, [{ ref: op.ref, changeIds: first.receipts[0]!.changeIds, decision: "accept", text, expectText }]);
+    return { out };
   };
 
   it("a span-granularity replace reads as the original with the wording in place", () => {
@@ -275,6 +275,31 @@ describe("accept-with-wording replaces the whole changed span (F1)", () => {
     expect(xml).not.toContain(`w:author="${AUTHOR}"`);
     expect(xml).not.toContain("w:del");
     expect(xml).not.toContain("w:ins");
+  });
+
+  it("the wording replaces the op's whole span, including words the word diff left unchanged", () => {
+    const body = P("10000001", R("Payment is due within thirty days of invoice receipt."));
+    const span = "due within thirty days of invoice";
+    const op: Op = { op: "replace", ref: "j", author: AUTHOR, addr: "10000001", start: 11, end: 11 + span.length, expectText: span, text: "due within fifteen days of the invoice", granularity: "word" };
+    const { out } = applyWording(body, op, "payable on receipt");
+    expect(openDocument(out).projection().map((p) => p.text)).toEqual(["Payment is payable on receipt receipt."]);
+  });
+
+  it("a delete accepted with wording puts the wording where the span was", () => {
+    const body = P("10000001", R("Fees are due on receipt of invoice."));
+    const op: Op = { op: "delete", ref: "d", author: AUTHOR, addr: "10000001", start: 9, end: 23, expectText: "due on receipt" };
+    const { out } = applyWording(body, op, "payable in 30 days");
+    expect(openDocument(out).projection().map((p) => p.text)).toEqual(["Fees are payable in 30 days of invoice."]);
+  });
+
+  it("wording fails, naming the decision, when expectText is missing or does not cover the change", () => {
+    const body = P("10000001", R("Fee A and Fee B apply."));
+    const op: Op = { op: "replace", ref: "j", author: AUTHOR, addr: "10000001", start: 14, end: 15, expectText: "B", text: "C" };
+    const first = runApply(body, [op]);
+    const ids = first.receipts[0]!.changeIds;
+    expect(() => finalizeDocx(first.out, [{ ref: "j", changeIds: ids, decision: "accept", text: "X" }])).toThrow(/j\) accepts with wording but gives no expectText/);
+    expect(() => finalizeDocx(first.out, [{ ref: "j", changeIds: ids, decision: "accept", text: "X", expectText: "Fee A" }])).toThrow(/covers its changes nowhere/);
+    expect(() => finalizeDocx(first.out, [{ ref: "j", changeIds: ["999"], decision: "accept" }])).toThrow(/change 999, which is not a revision/);
   });
 });
 
@@ -309,27 +334,64 @@ describe("verify is a whole-package gate (F8)", () => {
   });
 });
 
+describe("verify checks inserted paragraphs by markup, not text", () => {
+  const body = P("10000001", R("Scope.")) + P("10000002", R("Fees."));
+  const insertOne = () => runApply(body, [{ op: "insertParagraphAfter", ref: "i", author: AUTHOR, addr: "10000001", text: "New clause." }]);
+  const tamper = (out: Uint8Array, addr: string, extra: string): Uint8Array => {
+    const entries = readPackage(out);
+    const xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
+    const at = xml.indexOf("</w:p>", xml.indexOf(`w14:paraId="${addr}"`));
+    entries.set("word/document.xml", encodePart(xml.slice(0, at) + extra + xml.slice(at)));
+    return writePackage(entries);
+  };
+
+  it("an honest insert verifies", () => {
+    const { norm, out, receipts } = insertOne();
+    expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+  });
+
+  it("hidden text or an empty run added to the inserted paragraph fails", () => {
+    const { norm, out, receipts } = insertOne();
+    const addr = receipts[0]!.insertedAddr!;
+    const hidden = verifyOutput(norm, tamper(out, addr, '<w:r><w:rPr><w:vanish/></w:rPr><w:t>secret</w:t></w:r>'), receipts);
+    expect(hidden.ok).toBe(false);
+    expect(hidden.failures.join(" ")).toMatch(/outside its revisions/);
+    expect(verifyOutput(norm, tamper(out, addr, "<w:r><w:rPr><w:b/></w:rPr></w:r>"), receipts).ok).toBe(false);
+  });
+
+  it("hidden formatting inside our insertion fails", () => {
+    const { norm, out, receipts } = insertOne();
+    const entries = readPackage(out);
+    const xml = new TextDecoder().decode(entryBytes(entries.get("word/document.xml")!));
+    const hiddenIns = xml.replace(/(<w:ins [^>]*w:author="[^"]*"[^>]*><w:r>)(<w:rPr>)?/, (m, head, rPr) => `${head}<w:rPr><w:vanish/>${rPr ? "" : "</w:rPr>"}`);
+    expect(hiddenIns).not.toBe(xml);
+    entries.set("word/document.xml", encodePart(hiddenIns));
+    const result = verifyOutput(norm, writePackage(entries), receipts);
+    expect(result.ok).toBe(false);
+  });
+});
+
 describe("input limits refuse hostile packages with typed errors (F13)", () => {
   const base = docx(P("10000001", R("Fee is $10,000.")));
 
   it("duplicate entry names are refused", () => {
+    // a Map cannot hold a name twice: write a same-length stand-in name, then
+    // rename it in the local header and the central directory
     const entries = readPackage(base);
-    const doubled = new Map([...entries, ...entries]);
-    // writing collapses duplicates; build the archive by hand instead
+    entries.set("word/documenX.xml", entries.get("word/document.xml")!);
     const bytes = writePackage(entries);
-    const patched = new Uint8Array(bytes.length + entries.get("word/document.xml")!.length);
-    expect(() => {
-      const bad = new Map(entries);
-      bad.set("word/document.xml", entries.get("word/document.xml")!);
-      // duplicate via the reader is impossible through the Map; the reader
-      // refuses what the central directory declares twice
-      const raw = writePackage(new Map([...bad, ["word/document.xml", entries.get("word/document.xml")!]]));
-      throw new PackageLimitError("duplicate_entry", "placeholder");
-      void raw;
-    }).toThrow(PackageLimitError);
-    void patched;
-    void bytes;
-    void doubled;
+    const from = new TextEncoder().encode("word/documenX.xml");
+    const to = new TextEncoder().encode("word/document.xml");
+    let renamed = 0;
+    for (let i = 0; i + from.length <= bytes.length; i++) {
+      if (from.every((b, k) => bytes[i + k] === b)) {
+        bytes.set(to, i);
+        renamed++;
+      }
+    }
+    expect(renamed).toBe(2);
+    expect(() => normalizeDocx(bytes)).toThrow(PackageLimitError);
+    expect(() => normalizeDocx(bytes)).toThrow(/duplicate/);
   });
 
   it("an entry over the per-entry limit is refused", () => {
@@ -381,7 +443,7 @@ describe("AlternateContent branches and office math are listed but locked (F17, 
       { op: "replace", ref: "c2", author: AUTHOR, addr: "10000001", start: 0, end: 6, expectText: "Before", text: "Y" },
     ]);
     expect(receipts.map((r) => `${r.ref}:${r.status}${r.reason ? "/" + r.reason : ""}`)).toEqual([
-      "c1:refused/span_in_alternate_content",
+      "c1:refused/span_crosses_structure",
       "c2:applied",
     ]);
   });
@@ -396,7 +458,7 @@ describe("AlternateContent branches and office math are listed but locked (F17, 
       { op: "replace", ref: "m2", author: AUTHOR, addr: "10000002", start: 0, end: 3, expectText: "End", text: "Fin" },
     ]);
     expect(receipts.map((r) => `${r.ref}:${r.status}${r.reason ? "/" + r.reason : ""}`)).toEqual([
-      "m1:refused/span_in_math",
+      "m1:refused/span_crosses_structure",
       "m2:applied",
     ]);
   });

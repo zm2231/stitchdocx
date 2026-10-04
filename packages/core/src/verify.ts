@@ -6,7 +6,7 @@
 // anywhere fails.
 import { cloneNode, decodePart, decodeEntities, kid, mainPartName, openPackage, parseXml, serializeXml, removeAttr, setAttr, textNode, type XElement } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
-import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, wordText, type View } from "./projection.js";
+import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, runHidden, wordText, type View } from "./projection.js";
 import { isRevisionEl } from "./revisions.js";
 import type { Addr, Receipt } from "./types.js";
 
@@ -130,6 +130,24 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
       changeIdsByAddr.set(r.addr, ids);
     }
   }
+  // an inserted paragraph holds nothing but our revisions: with them inverted,
+  // only its paragraph properties remain. And no text we inserted is hidden.
+  const allOurs = new Set(applied.flatMap((r) => (r.changeIds ?? []).map(String)));
+  for (const r of applied) {
+    if (!r.insertedAddr) continue;
+    const inserted = outById.get(r.insertedAddr);
+    if (!inserted) continue;
+    const clone = cloneNode(inserted.node) as XElement;
+    invert(clone, allOurs);
+    dropEmptyMarkPr(clone);
+    const extra = clone.children.filter((c) => c.kind === "el" && c.name !== "w:pPr");
+    if (extra.length > 0) failures.push(`receipt ${r.index}: inserted paragraph ${r.insertedAddr} holds content outside its revisions (${extra.map((c) => (c as XElement).name).join(", ")})`);
+  }
+  for (const rev of walkEls(outDoc.root)) {
+    if ((rev.name !== "w:ins" && rev.name !== "w:moveTo") || !allOurs.has(attrVal(rev, "w:id") ?? "")) continue;
+    if (walkEls(rev).some((c) => c.name === "w:r" && runHidden(c))) failures.push(`change ${attrVal(rev, "w:id")} inserts hidden text`);
+  }
+
   const expectedCount = origRecords.length + insertAddrs.size;
   if (outRecords.length !== expectedCount) failures.push(`output has ${outRecords.length} paragraphs, expected ${expectedCount}`);
   for (let i = 0; i < origRecords.length; i++) {

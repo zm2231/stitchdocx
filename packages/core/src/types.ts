@@ -14,24 +14,16 @@ export interface Paragraph {
   readOnlyReason?: string;
 }
 
-/** engine-level decision: by changeIds or by author (research/04 §3) */
-export type RevisionDecision =
-  | { changeIds: string[]; decision: "accept" | "reject" }
-  | { author: string; decision: "accept" | "reject" };
-
-/** finalize decision: names the receipt's changeIds, or (legacy) an author.
- *  Plain accept/reject, or accept with the caller's replacement wording. */
+/** finalize decision: the revisions it resolves are the receipt's changeIds */
 export interface Decision {
-  /** caller's id, echoed on the finalize result */
+  /** caller's id, echoed on the result */
   ref: string;
-  /** the revision author — required for author-keyed decisions; derived from
-   *  the revisions when the decision names changeIds instead */
-  author?: string;
+  changeIds: string[];
   decision: "accept" | "reject";
-  /** the w:id values this decision resolves (from the receipt's changeIds) */
-  changeIds?: string[];
-  /** accept-with-caller-wording (adapter-level finalize composition) */
+  /** accept with the caller's wording in place of the flagged span or inserted paragraph */
   text?: string;
+  /** the op's expectText; with `text`, it locates the whole flagged span of a replace or delete */
+  expectText?: string;
 }
 
 export type Op =
@@ -74,8 +66,6 @@ export type RefusalReason =
   | "span_crosses_structure"
   | "span_in_field"
   | "span_in_content_control"
-  | "span_in_alternate_content"
-  | "span_in_math"
   | "paragraph_not_editable"
   | "insert_in_plain_text_control";
 
@@ -98,9 +88,9 @@ export interface Receipt {
   insertedAddr?: Addr;
 }
 
-/** result of Document.decide — a decision is document-wide, so it has no op identity */
 export interface DecisionResult {
   index: number;
+  ref: string;
   decision: "accept" | "reject";
   /** w:id of every revision this decision resolved */
   changeIds: string[];

@@ -9,7 +9,7 @@
 // calls it `ref` (a neutral caller id echoed on receipts). This adapter maps
 // between the two and is the only place the wire name exists.
 import { readFileSync, writeFileSync } from "node:fs";
-import { isIsoDate, normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision, type RevisionDecision } from "@stitchdocx/core";
+import { finalizeDocx, isIsoDate, normalizeDocx, openDocument, verifyOutput, type Op, type Receipt, type Decision } from "@stitchdocx/core";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -41,6 +41,15 @@ const toCoreReceipt = (r: WireReceipt, index: number): Receipt => {
 const toWireReceipt = (r: Receipt): WireReceipt => {
   const { ref, ...rest } = r;
   return { ...rest, flagId: ref };
+};
+
+type WireDecision = Omit<Decision, "ref"> & { flagId?: string };
+const toCoreDecision = (d: WireDecision, index: number): Decision => {
+  const { flagId, ...rest } = d;
+  if (!flagId) fail(`decision ${index} is missing its flagId`);
+  if (!Array.isArray(rest.changeIds) || rest.changeIds.length === 0) fail(`decision ${index} (flagId ${flagId}) needs the receipt's changeIds`);
+  if (rest.decision !== "accept" && rest.decision !== "reject") fail(`decision ${index} (flagId ${flagId}) must be accept or reject`);
+  return { ...rest, changeIds: rest.changeIds.map(String), ref: flagId };
 };
 
 const requireDate = (value: unknown, what: string): string => {
@@ -82,37 +91,11 @@ try {
     case "finalize": {
       const [inp, decPath, outp] = args;
       if (!inp || !decPath || !outp) fail("usage: finalize <in.docx> <decisions.json> <out.docx>");
-      const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: Array<Omit<Decision, "ref"> & { ref?: string; flagId?: string }> };
+      const spec = JSON.parse(readFileSync(decPath, "utf8")) as { date?: string; decisions: WireDecision[] };
       if (spec.date !== undefined) requireDate(spec.date, "date");
-      const doc = openDocument(new Uint8Array(readFileSync(inp)));
-      const results: Array<{ flagId: string; author: string | null; decision: string; resolved: number }> = [];
-      // a decision resolves exactly the revisions it names — the receipt's
-      // changeIds (or, legacy, exactly that author; revisions by anyone else
-      // survive untouched). A decision that matches nothing fails: silence
-      // here would resolve nothing and report success.
-      for (const [index, d] of (spec.decisions ?? []).entries()) {
-        const ref = d.ref ?? d.flagId;
-        if (!ref) fail(`decision ${index} is missing its flagId`);
-        if (!Array.isArray(d.changeIds) && (typeof d.author !== "string" || d.author.trim() === "")) {
-          fail(`decision ${index} (flagId ${ref}) needs changeIds or a non-empty author`);
-        }
-        const core: Decision = { ...d, ref };
-        if (core.text !== undefined) {
-          const resolved = doc.acceptWithText(core);
-          if (resolved === 0) fail(`decision ${index} (flagId ${ref}) matched no revisions`);
-          results.push({ flagId: d.flagId ?? ref, author: d.author ?? null, decision: "accept", resolved });
-        } else {
-          const engineDecision: RevisionDecision = "changeIds" in d && Array.isArray(d.changeIds)
-            ? { changeIds: d.changeIds.map(String), decision: d.decision }
-            : { author: d.author!, decision: d.decision };
-          const decided = doc.decide([engineDecision]);
-          const resolved = decided.reduce((n, r) => n + r.changeIds.length, 0);
-          if (resolved === 0) fail(`decision ${index} (flagId ${ref}) matched no revisions`);
-          results.push({ flagId: d.flagId ?? ref, author: d.author ?? null, decision: d.decision, resolved });
-        }
-      }
-      writeFileSync(outp, doc.save());
-      out({ results });
+      const { docx, results } = finalizeDocx(new Uint8Array(readFileSync(inp)), (spec.decisions ?? []).map(toCoreDecision));
+      writeFileSync(outp, docx);
+      out({ results: results.map(({ ref, ...rest }) => ({ ...rest, flagId: ref })) });
       break;
     }
     case "verify": {

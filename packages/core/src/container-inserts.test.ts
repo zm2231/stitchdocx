@@ -32,6 +32,12 @@ function xmlOf(bytes: Uint8Array): string {
   return new TextDecoder().decode(entryBytes(readPackage(bytes).get("word/document.xml")!));
 }
 
+/** ids of every revision by `author` in the document part, in order */
+const idsBy = (bytes: Uint8Array, author: string): string[] =>
+  [...xmlOf(bytes).matchAll(/<w:(?:ins|del|moveFrom|moveTo|\w+PrChange)\b[^>]*>/g)]
+    .filter((m) => m[0].includes(`w:author="${author}"`))
+    .map((m) => /w:id="([^"]+)"/.exec(m[0])![1]!);
+
 /** the source of one paragraph, from its paraId to its end tag */
 function paraXml(xml: string, paraId: string): string {
   const at = xml.indexOf(`w14:paraId="${paraId}"`);
@@ -69,7 +75,7 @@ describe("inserted paragraph at the end of a container", () => {
     const { out } = runOn(BODY_END, [insert("10000000", "New clause.")]);
     const applied = openDocument(out);
     const insertedAddr = applied.projection().at(-1)!.addr;
-    applied.decide([{ author: AUTHOR, decision: "reject" }]);
+    applied.decide([{ ref: "i", changeIds: idsBy(out, AUTHOR), decision: "reject" }]);
     const fin = applied.save();
     const paras = openDocument(fin).projection();
     expect(paras.map((p) => p.addr)).toEqual(["10000001", "10000000"]); // the anchor's own paraId survives
@@ -83,7 +89,7 @@ describe("inserted paragraph at the end of a container", () => {
   it("engine accept leaves both paragraphs plain", () => {
     const { out } = runOn(BODY_END, [insert("10000000", "New clause.")]);
     const doc = openDocument(out);
-    doc.decide([{ author: AUTHOR, decision: "accept" }]);
+    doc.decide([{ ref: "i", changeIds: idsBy(out, AUTHOR), decision: "accept" }]);
     const paras = openDocument(doc.save()).projection();
     expect(paras.map((p) => p.text)).toEqual(["Earlier paragraph.", "Final heading.", "New clause."]);
     const xml = xmlOf(doc.save());
@@ -98,7 +104,7 @@ describe("inserted paragraph at the end of a container", () => {
     expect(receipts[1]!.changeIds).toHaveLength(3);
     expect(verifyOutput(normalizeDocx(docx(BODY_END)).docx, out, receipts).ok).toBe(true);
     const doc = openDocument(out);
-    doc.decide([{ author: AUTHOR, decision: "reject" }]);
+    doc.decide([{ ref: "i", changeIds: idsBy(out, AUTHOR), decision: "reject" }]);
     const paras = openDocument(doc.save()).projection();
     expect(paras.map((p) => p.text)).toEqual(["Earlier paragraph.", "Final heading."]);
   });
@@ -109,7 +115,7 @@ describe("inserted paragraph at the end of a container", () => {
     expect(paraXml(xmlOf(out), "10000001")).toContain('<w:rPr><w:ins ');
     expect(xmlOf(out)).toContain("w:pPrChange");
     const doc = openDocument(out);
-    doc.decide([{ author: AUTHOR, decision: "reject" }]);
+    doc.decide([{ ref: "i", changeIds: idsBy(out, AUTHOR), decision: "reject" }]);
     expect(openDocument(doc.save()).projection().map((p) => p.text)).toEqual(["Before the table.", "Cell."]);
   });
 
@@ -128,7 +134,7 @@ describe("inserted paragraph at the end of a container", () => {
       P("10000001", `<w:pPr><w:rPr><w:ins w:id="7" w:author="Reviewer A" w:date="${DATE}"/></w:rPr></w:pPr>` + R("Anchor.")) +
       P("10000000", `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="8" w:author="Reviewer A" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` + R("Kept text."));
     const doc = openDocument(docx(body));
-    doc.decide([{ author: "Reviewer A", decision: "reject" }]);
+    doc.decide([{ ref: "p", changeIds: ["7", "8"], decision: "reject" }]);
     const out = doc.save();
     const paras = openDocument(out).projection();
     expect(paras.map((p) => p.text)).toEqual(["Anchor.Kept text."]);
@@ -139,13 +145,13 @@ describe("inserted paragraph at the end of a container", () => {
     expect(paraXml(xml, "10000000")).toBeTruthy(); // P2 survived on its own paraId
   });
 
-  it("acceptWithText removes only the paired insert's pPrChange, never an unrelated one", () => {
+  it("accepting with wording removes only the paired insert's pPrChange, never an unrelated one", () => {
     // positive control: a genuine container-end pair
     const body =
       P("10000001", `<w:pPr><w:rPr><w:ins w:id="7" w:author="Reviewer A" w:date="${DATE}"/></w:rPr></w:pPr>` + R("Anchor.")) +
       P("10000000", `<w:pPr><w:pPrChange w:id="8" w:author="Reviewer A" w:date="${DATE}"><w:pPr/></w:pPrChange></w:pPr><w:ins w:id="9" w:author="Reviewer A" w:date="${DATE}">` + R("Clause.") + `</w:ins>`);
     const doc = openDocument(docx(body));
-    doc.acceptWithText({ ref: "d", author: "Reviewer A", decision: "accept", text: "Clause." });
+    doc.decide([{ ref: "d", changeIds: ["7", "8", "9"], decision: "accept", text: "Clause." }]);
     const xml = xmlOf(doc.save());
     expect(xml).not.toContain("Reviewer A");
     expect(xml).not.toContain("w:pPrChange");
@@ -156,7 +162,7 @@ describe("inserted paragraph at the end of a container", () => {
       P("10000001", R("Plain paragraph.")) +
       P("10000000", `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="8" w:author="Reviewer A" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` + R("Kept ") + `<w:ins w:id="9" w:author="Reviewer A" w:date="${DATE}">` + R("words") + `</w:ins>` + R("."));
     const doc2 = openDocument(docx(body2));
-    doc2.acceptWithText({ ref: "d", author: "Reviewer A", decision: "accept", text: "wording" });
+    doc2.decide([{ ref: "d", changeIds: ["9"], decision: "accept", text: "wording", expectText: "" }]);
     const xml2 = xmlOf(doc2.save());
     expect(xml2).toContain("w:pPrChange"); // the property change is not ours to resolve
     expect(xml2).toContain('<w:jc w:val="center"/>');
@@ -173,7 +179,7 @@ describe("mid-container inserts keep the previous form", () => {
     expect(paraXml(xml, receipts[0]!.insertedAddr!)).toContain("<w:pPr><w:rPr><w:ins ");
     expect(xml).not.toContain("w:pPrChange");
     const doc = openDocument(out);
-    doc.decide([{ author: AUTHOR, decision: "reject" }]);
+    doc.decide([{ ref: "i", changeIds: idsBy(out, AUTHOR), decision: "reject" }]);
     const paras = openDocument(doc.save()).projection();
     expect(paras.map((p) => p.text)).toEqual(["Anchor paragraph.", "Next paragraph."]);
   });
@@ -208,7 +214,7 @@ describe("mid-container inserts keep the previous form", () => {
     // pre-existing tracked insert (client redline): mark on the new paragraph, mid-container
     const body = P("10000000", R("Anchor.")) + P("10000002", `<w:pPr><w:rPr><w:ins w:id="7" w:author="Client Author" w:date="${DATE}"/></w:rPr></w:pPr><w:ins w:id="8" w:author="Client Author" w:date="${DATE}">` + R("Their clause.") + `</w:ins>`) + P("10000001", R("Next."));
     const doc = openDocument(docx(body));
-    doc.decide([{ author: "Client Author", decision: "reject" }]);
+    doc.decide([{ ref: "c", changeIds: ["7", "8"], decision: "reject" }]);
     expect(openDocument(doc.save()).projection().map((p) => p.text)).toEqual(["Anchor.", "Next."]);
   });
 });

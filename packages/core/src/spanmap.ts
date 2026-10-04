@@ -120,9 +120,7 @@ export interface SpanIssue {
     | "span_overlaps_prior_op"
     | "span_crosses_structure"
     | "span_in_field"
-    | "span_in_content_control"
-    | "span_in_alternate_content"
-    | "span_in_math";
+    | "span_in_content_control";
   detail?: string;
 }
 
@@ -160,12 +158,11 @@ export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Ar
     if (start < pr.end && pr.start < end) return { reason: "span_overlaps_prior_op" };
   }
   // mutation safety: every covered run must share one parent (an unmodelled
-  // inline wrapper such as w:customXml would otherwise be partially deleted)
-  if (parents.size > 1 || structures.size > 1) return { reason: "span_crosses_structure" };
+  // inline wrapper such as w:customXml would otherwise be partially deleted).
+  // Office math and AlternateContent are structure the engine lists but never rewrites.
+  if (parents.size > 1 || structures.size > 1 || hasAlternate || hasMath) return { reason: "span_crosses_structure" };
   if (hasField) return { reason: "span_in_field" };
   if (hasSdt) return { reason: "span_in_content_control" };
-  if (hasAlternate) return { reason: "span_in_alternate_content" };
-  if (hasMath) return { reason: "span_in_math" };
   if (start === end) {
     // point insertion: the field/sdt protections still apply at the point, and
     // the surrounding run's revision is refused unless THIS call created it
@@ -176,7 +173,7 @@ export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Ar
       if ((info.rev && !ownedRevisions.has(info.rev)) || info.trackedRow) return { reason: "span_overlaps_revision" };
       if (pc.inFieldResult) return { reason: "span_in_field" };
       if (info.inlineSdt) return { reason: "span_in_content_control" };
-      if (pc.lock) return { reason: pc.lock === "alternate" ? "span_in_alternate_content" : "span_in_math" };
+      if (pc.lock) return { reason: "span_crosses_structure" };
     }
   }
   return null;

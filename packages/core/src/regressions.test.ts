@@ -48,7 +48,7 @@ describe("tracked-change regression tests", () => {
     expect(xml).not.toMatch(/<w:ins [^>]*><w:ins /);
     // independent reject of f1 leaves f2's text
     const doc2 = openDocument(out1);
-    doc2.decide([{ author: "Reviewer A [f1]", decision: "reject" }]);
+    doc2.decide([{ ref: "f1", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
     const text = doc2.projection().find((p) => p.addr === "10000001")!.text;
     expect(text).toContain("BBB ");
     expect(text).not.toContain("AAA ");
@@ -155,8 +155,8 @@ describe("tracked-change regression tests", () => {
     const body = P("10000001", R("Payments begin on the start date."));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
-    doc.acceptWithText({ ref: "f", author: "Reviewer A [f]", decision: "accept", text: "BBB " });
+    const [r] = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 16, end: 16, expectText: "", text: "AAA " }], { date: DATE });
+    doc.decide([{ ref: "f", changeIds: r!.changeIds, decision: "accept", text: "BBB ", expectText: "" }]);
     const text = doc.projection().find((p) => p.addr === "10000001")!.text;
     // offset 16 sits after the first "o" of "on": original text with BBB at 16
     expect(text).toBe("Payments begin oBBB n the start date.");
@@ -164,34 +164,33 @@ describe("tracked-change regression tests", () => {
     expect(xml).not.toContain("Reviewer A");
   });
 
-  it("decide resolves move and property-change revisions by exact author, leaving others untouched", () => {
+  it("decide resolves move and property-change revisions by change id, leaving others untouched", () => {
     const body = P("10000001",
-      `<w:moveFrom w:id="90" w:author="Ours [legacy]" w:date="${DATE}">` + R("gone") + `</w:moveFrom>` +
+      `<w:moveFrom w:id="90" w:author="Reviewer A [m]" w:date="${DATE}">` + R("gone") + `</w:moveFrom>` +
       `<w:moveFrom w:id="92" w:author="Client Author" w:date="${DATE}">` + R("theirs") + `</w:moveFrom>` +
-      `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Ours [legacy]" w:date="${DATE}"><w:rPr/></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
+      `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Reviewer A [m]" w:date="${DATE}"><w:rPr/></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));
-    const resolved = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
+    const resolved = doc.decide([{ ref: "m", changeIds: ["90", "91"], decision: "reject" }]);
     expect(resolved[0]!.changeIds.sort()).toEqual(["90", "91"]);
     const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
-    expect(xml).not.toContain("Ours [legacy]");
+    expect(xml).not.toContain("Reviewer A [m]");
     expect(xml).toContain("Client Author"); // D3: revisions we never wrote survive
     expect(xml).toContain("gone"); // reject moveFrom restores the text
   });
 
-  it("exact-author decisions resolve moveTo and pPrChange and are idempotent", () => {
+  it("decisions resolve moveTo and pPrChange, and naming a resolved change fails", () => {
     const body = P("10000001",
-      `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="94" w:author="Ours [legacy]" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` +
-      `<w:moveTo w:id="93" w:author="Ours [legacy]" w:date="${DATE}">` + R("moved") + `</w:moveTo>` + R("stay"));
+      `<w:pPr><w:jc w:val="center"/><w:pPrChange w:id="94" w:author="Reviewer A [m]" w:date="${DATE}"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>` +
+      `<w:moveTo w:id="93" w:author="Reviewer A [m]" w:date="${DATE}">` + R("moved") + `</w:moveTo>` + R("stay"));
     const doc = openDocument(docx(body));
-    const first = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
+    const first = doc.decide([{ ref: "m", changeIds: ["93", "94"], decision: "reject" }]);
     expect(first[0]!.changeIds.sort()).toEqual(["93", "94"]);
-    // a second decision for the same author resolves nothing further
-    const second = doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
-    expect(second[0]!.changeIds).toEqual([]);
+    // the changes are gone, so a second decision naming them fails rather than resolving nothing
+    expect(() => doc.decide([{ ref: "m", changeIds: ["93"], decision: "reject" }])).toThrow(/not a revision/);
     const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(openDocument(doc.save()).projection()[0]!.text).toBe("stay"); // reject removes the moveTo content
     expect(xml).toContain('<w:jc w:val="right"/>'); // pPrChange reject restores the saved props
-    expect(xml).not.toContain("Ours [legacy]");
+    expect(xml).not.toContain("Reviewer A [m]");
   });
 
   it("decide accepts changeIds-based decisions and returns receipts", () => {
@@ -201,7 +200,7 @@ describe("tracked-change regression tests", () => {
     const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 4, end: 7, expectText: "fee", text: "charge" }], { date: DATE });
     const ids = receipts[0]!.changeIds;
     const doc2 = openDocument(doc.save());
-    const decideReceipts = doc2.decide([{ changeIds: ids, decision: "reject" }]);
+    const decideReceipts = doc2.decide([{ ref: "f", changeIds: ids, decision: "reject" }]);
     expect(decideReceipts[0]!.changeIds.length).toBeGreaterThan(0);
     expect(doc2.projection()[0]!.text).toBe("The fee is due.");
   });
@@ -317,18 +316,18 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     const body = P("10000001", R("A") + `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1">` + R("BC") + `</w:hyperlink>` + R("D"));
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 2, end: 2, expectText: "", text: "X" }], { date: DATE });
-    doc.acceptWithText({ ref: "f", author: "Reviewer A [f]", decision: "accept", text: "Y" });
+    const [r] = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 2, end: 2, expectText: "", text: "X" }], { date: DATE });
+    doc.decide([{ ref: "f", changeIds: r!.changeIds, decision: "accept", text: "Y", expectText: "" }]);
     expect(doc.projection()[0]!.text).toBe("ABYCD");
   });
 
   it("rejecting a property change restores the saved props (no merge)", () => {
-    const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Ours [legacy]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
+    const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Reviewer A [m]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));
-    doc.decide([{ author: "Ours [legacy]", decision: "reject" }]);
+    doc.decide([{ ref: "p", changeIds: ["91"], decision: "reject" }]);
     const xml = new TextDecoder().decode(entryBytes(readPackage(doc.save()).get("word/document.xml")!));
     expect(xml).toContain("<w:i/>");
     expect(xml).not.toContain("<w:b/>");
-    expect(xml).not.toContain("Ours [legacy]");
+    expect(xml).not.toContain("Reviewer A [m]");
   });
 });
