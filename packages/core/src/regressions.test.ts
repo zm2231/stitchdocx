@@ -94,11 +94,28 @@ describe("tracked-change regression tests", () => {
     expect(Buffer.from(doc.save()).equals(Buffer.from(before))).toBe(true);
   });
 
-  it("CR/CRLF in text projects LF-normalized like the spec parser", () => {
+  it("CR/CRLF in text normalizes to LF at parse time and reads as a space, like Word", () => {
     const body = P("10000001", `<w:r><w:t>A\r\nB\rC</w:t></w:r>`);
     const { docx: norm } = normalizeDocx(docx(body));
     const doc = openDocument(norm);
-    expect(doc.projection()[0]!.text).toBe("A\nB\nC");
+    expect(doc.projection()[0]!.text).toBe("A B C");
+  });
+
+  it("w:t text reads the way Word reads it", () => {
+    const textOf = (inner: string, preserve = false): string => {
+      const attr = preserve ? ` xml:space="preserve"` : "";
+      const doc = openDocument(normalizeDocx(docx(P("10000001", `<w:r><w:t${attr}>${inner}</w:t></w:r>`))).docx);
+      return doc.projection()[0]!.text;
+    };
+    // edge whitespace is Word-dropped without xml:space="preserve", kept with it
+    expect(textOf("  lead")).toBe("lead");
+    expect(textOf("trail   ")).toBe("trail");
+    expect(textOf("p   q  ", true)).toBe("p   q  ");
+    // internal runs of spaces survive; newline and tab read as spaces
+    expect(textOf("a   b")).toBe("a   b");
+    expect(textOf("a\nb")).toBe("a b");
+    expect(textOf("a\tb")).toBe("a b");
+    expect(textOf("a\tb", true)).toBe("a b");
   });
 
   it("normalize reassigns duplicate paraIds deterministically and stays idempotent", () => {

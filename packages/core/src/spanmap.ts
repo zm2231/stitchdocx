@@ -1,8 +1,10 @@
 // Span map: the paragraph's visible text tiled into char pieces, each tied to
 // the run that produced it, with the ancestry metadata the refusal checks need
 // (revision, hyperlink/smartTag structure, inline content control, field).
-import { decodeText, type XElement } from "@stitchdocx/package-io";
-import { walkContent, type CharKind, type View } from "./projection.js";
+// Text coordinates are what Word reads (wordText), the same space the
+// projection and the contract's offsets live in.
+import { type XElement } from "@stitchdocx/package-io";
+import { walkContent, wordText, type CharKind, type View } from "./projection.js";
 
 export interface SpanPiece {
   run: XElement;
@@ -39,22 +41,13 @@ export function buildSpanMap(p: XElement, view: View): SpanMap {
       const run = el.parent;
       if (!run || run.kind !== "el") return;
       if (!runInfo.has(run)) runInfo.set(run, ancestry(run, p));
-      const decoded = kind === "text" ? textOfCharEl(el) : "";
+      const decoded = kind === "text" ? wordText(el) : "";
       const len = kind === "text" ? decoded.length : 1;
       pieces.push({ run, el, kind, start: pos, end: pos + len, decoded, inFieldResult });
       pos += len;
     },
   });
   return { text: pieces.map((pc) => (pc.kind === "text" ? pc.decoded : pc.kind === "tab" ? "\t" : pc.kind === "break" ? "\n" : "-")).join(""), pieces, runInfo };
-}
-
-function textOfCharEl(el: XElement): string {
-  let out = "";
-  for (const c of el.children) {
-    if (c.kind === "text") out += decodeText(c.raw); // decoded + CR-normalized: offsets live in projection text space
-    else if (c.kind === "raw" && c.raw.startsWith("<![CDATA[")) out += c.raw.slice(9, -3);
-  }
-  return out;
 }
 
 function ancestry(run: XElement, paragraph: XElement): RunInfo {

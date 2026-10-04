@@ -12,7 +12,24 @@ import { ParaIdAllocator } from "./revisions.js";
 
 export const W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml";
 
-export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: number } {
+/** the editing restriction Word enforces (word/settings.xml), or null. Only an
+ *  enforced w:documentProtection with a known mode counts; the document is
+ *  never modified here — callers surface the restriction to the user. */
+export function readProtection(entries: Entries): string | null {
+  const settingsXml = entries.get("word/settings.xml");
+  if (!settingsXml) return null;
+  const tree = parseXml(decodePart(settingsXml));
+  const settings = kid(tree as unknown as XElement, "w:settings");
+  if (!settings) return null;
+  const dp = kid(settings, "w:documentProtection");
+  if (!dp) return null;
+  const enforcement = getAttr(dp, "w:enforcement");
+  if (enforcement === null || !["1", "true", "on"].includes(enforcement)) return null;
+  const edit = getAttr(dp, "w:edit");
+  return edit !== null && ["readOnly", "comments", "trackedChanges", "forms"].includes(edit) ? edit : null;
+}
+
+export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: number; protection: string | null } {
   const entries: Entries = readPackage(bytes);
   const docXml = entries.get("word/document.xml");
   if (!docXml) throw new Error("word/document.xml missing");
@@ -45,7 +62,7 @@ export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: 
   }
   if (assigned > 0) {
     entries.set("word/document.xml", encodePart(serializeXml(tree)));
-    return { docx: writePackage(entries), assigned };
+    return { docx: writePackage(entries), assigned, protection: readProtection(entries) };
   }
-  return { docx: bytes, assigned: 0 };
+  return { docx: bytes, assigned: 0, protection: readProtection(entries) };
 }

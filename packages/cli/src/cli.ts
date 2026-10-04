@@ -47,9 +47,9 @@ try {
     case "normalize": {
       const [inp, outp] = args;
       if (!inp || !outp) fail("usage: normalize <in.docx> <out.docx>");
-      const { docx, assigned } = normalizeDocx(new Uint8Array(readFileSync(inp)));
+      const { docx, assigned, protection } = normalizeDocx(new Uint8Array(readFileSync(inp)));
       writeFileSync(outp, docx);
-      out({ assigned });
+      out({ assigned, protection });
       break;
     }
     case "paragraphs": {

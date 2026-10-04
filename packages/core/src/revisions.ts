@@ -141,10 +141,36 @@ export function textToRunChildren(text: string): XNode[] {
   return children;
 }
 
-/** clone of a run's w:rPr, or null (null-safe on runs without formatting) */
+/** clone of a run's w:rPr for a NEW run, or null (null-safe on runs without
+ *  formatting). Revision records inside the source rPr (a pending formatting
+ *  change) are dropped: they belong to the run they were written on, and
+ *  copying them would duplicate their w:id. Rendering is unaffected — the
+ *  record holds the previous formatting, not the current one. */
 export function cloneRunPr(run: XElement | null): XElement | null {
   const rPr = run ? kid(run, "w:rPr") : null;
-  return rPr ? (cloneNode(rPr) as XElement) : null;
+  if (!rPr) return null;
+  const clone = cloneNode(rPr) as XElement;
+  dropRevisionRecords(clone);
+  return clone;
+}
+
+/** remove every revision element anywhere inside `root` (in place) */
+function dropRevisionRecords(root: XElement): void {
+  const drop = (node: XElement): void => {
+    node.children = node.children.filter((c) => !(c.kind === "el" && isRevisionEl(c)));
+    for (const c of node.children) if (c.kind === "el") drop(c);
+  };
+  drop(root);
+}
+
+/** give every revision element anywhere inside `root` a fresh w:id (author and
+ *  date stay). Used when a run is SPLIT: the first piece keeps the original
+ *  records, each further piece gets its own copy with a unique id — a document
+ *  may never hold two revisions with the same w:id. */
+export function reidRevisionRecords(root: XElement, take: () => string): void {
+  for (const e of walkAll(root)) {
+    if (isRevisionEl(e)) setAttr(e, "w:id", take());
+  }
 }
 
 export function makeRun(rPr: XElement | null, content: XNode[]): XElement {

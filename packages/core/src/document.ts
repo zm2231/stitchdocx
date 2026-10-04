@@ -20,7 +20,7 @@ import {
 import { walkBody, type BodyWalk } from "./body.js";
 import { acceptAll, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
 import { executeApply, type ApplyDeps } from "./ops.js";
-import { isPairedInsertParagraph, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
+import { cloneRunPr, isPairedInsertParagraph, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt, RevisionDecision } from "./types.js";
 
@@ -200,7 +200,7 @@ export class Document {
       if (rec.markIns) {
         // our inserted paragraph: strip the marks, put the caller's text in plain runs
         const firstIns = rec.ins[0];
-        const rPr = firstIns ? cloneFirstRunPrFrom(firstIns) : null;
+        const rPr = firstIns ? cloneRunPr(firstIns) : null;
         let insertAt = para.children.length;
         for (const ins of rec.ins) {
           const i = para.children.indexOf(ins);
@@ -227,7 +227,7 @@ export class Document {
       if (rec.dels.length === 0 && rec.ins.length > 0) {
         const anchored = rec.ins[0]!;
         const parent = anchored.parent ?? para;
-        const rPr = cloneFirstRunPrFrom(anchored);
+        const rPr = cloneRunPr(anchored);
         let insertAt = parent.children.indexOf(anchored);
         if (insertAt < 0) insertAt = parent.children.length;
         for (const ins of rec.ins) {
@@ -266,7 +266,7 @@ export class Document {
               for (const c of del.children) if (c.kind === "el" && c.name === "w:r") return c;
               return null;
             })();
-            const rPr = firstRunInside ? cloneFirstRunPrFrom(firstRunInside) : null;
+            const rPr = firstRunInside ? cloneRunPr(firstRunInside) : null;
             const run = makeRun(rPr, textToRunChildren(decision.text!));
             parent.children.splice(i, 1, run);
             run.parent = parent;
@@ -302,11 +302,6 @@ export class Document {
     this.entries.set("word/document.xml", encodePart(serializeXml(this.tree)));
     return writePackage(this.entries);
   }
-}
-
-function cloneFirstRunPrFrom(run: XElement): XElement | null {
-  const rPr = kids(run).find((c) => c.name === "w:rPr");
-  return rPr ? (cloneNode(rPr) as XElement) : null;
 }
 
 function removeChildEl(parent: XElement, child: XElement): void {

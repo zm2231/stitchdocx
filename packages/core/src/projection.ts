@@ -11,6 +11,9 @@ import { walkBody, type BodyContext, type BodyWalk } from "./body.js";
 
 export const REVISION_NAMES = new Set(["w:ins", "w:del", "w:moveFrom", "w:moveTo"]);
 const SKIPPED = new Set(["w:pPr", "w:rPr", "w:instrText", "w:delInstrText"]);
+/** text boxes are not part of the paragraph's text and are never edited; Word
+ *  renders mc:Choice, never mc:Fallback */
+const UNSHOWN = new Set(["w:txbxContent", "mc:Fallback"]);
 
 /** decision for a revision element */
 export type View = (rev: { id: string | null; author: string | null; name: string }) => "accept" | "reject";
@@ -39,6 +42,17 @@ export function textContent(el: XElement): string {
   return out;
 }
 
+/**
+ * Text of a w:t or w:delText as Word reads it: without xml:space="preserve",
+ * leading and trailing space/tab/newline are dropped; in either mode a newline
+ * or tab character reads as a space.
+ */
+export function wordText(el: XElement): string {
+  let v = textContent(el);
+  if (attrVal(el, "xml:space") !== "preserve") v = v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  return v.replace(/[\t\r\n]/g, " ");
+}
+
 export type CharKind = "text" | "tab" | "break" | "hyphen";
 
 export interface WalkCallbacks {
@@ -64,6 +78,7 @@ export function walkContent(p: XElement, view: View, cb: WalkCallbacks): void {
 
   function visit(c: XElement, shown: boolean, fields: string[]): void {
     if (SKIPPED.has(c.name)) return;
+    if (UNSHOWN.has(c.name)) return;
     if (REVISION_NAMES.has(c.name)) {
       const s = shown && visibleRev(c, view);
       for (const cc of c.children) if (cc.kind === "el") visit(cc, s, fields);
@@ -108,7 +123,7 @@ export function paragraphText(p: XElement, view: View): string {
   let out = "";
   walkContent(p, view, {
     onCharEl: (el, kind) => {
-      if (kind === "text") out += textContent(el);
+      if (kind === "text") out += wordText(el);
       else if (kind === "tab") out += "\t";
       else if (kind === "break") out += "\n";
       else out += "-";
@@ -127,6 +142,10 @@ export interface ProjectionParagraph {
   inContentControl: boolean;
   style: string | null;
   numbered: boolean;
+  /** name of the revision element on this paragraph's removed mark, if the
+   *  mark is not visible under the view ("w:del" = a deleted mark under
+   *  accept, "w:ins" = an inserted mark under reject) */
+  removedMark: string | null;
   /** w:p elements merged into this record because their mark is not visible */
   merged: XElement[];
   node: XElement;
@@ -151,18 +170,22 @@ export function paragraphProps(p: XElement): { style: string | null; numbered: b
 }
 
 /**
- * Every paragraph in the main body under a view, in reader order. Paragraph
- * marks that are not visible merge the paragraph into the next one in the
- * same container, exactly like the reader (per-container pending; a pending
- * paragraph before a table is flushed unmerged; a trailing pending paragraph
- * survives only if its text is non-empty).
+ * Every paragraph in the main body under a view, in reader order. A paragraph
+ * whose mark is removed (an inserted mark rejected, a deleted mark accepted)
+ * merges into the next paragraph, as Word does:
+ * - directly before a table, into the first paragraph of the table's first cell;
+ * - at the end of a cell, a removed deletion that leaves the paragraph empty
+ *   disappears, and any other removed mark stays;
+ * - at the end of the body or of a content control, the paragraph stays,
+ *   empty or not.
  */
 export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagraph[] {
   const out: ProjectionParagraph[] = [];
   let tableIndex = -1;
 
-  const visit = (node: XElement, ctx: BodyContext): void => {
-    let pending: ProjectionParagraph | null = null;
+  /** returns the container's trailing removed-mark paragraph, if any */
+  const visit = (node: XElement, ctx: BodyContext, carry: ProjectionParagraph | null = null): ProjectionParagraph | null => {
+    let pending = carry;
     for (const c of kids(node)) {
       if (c.name === "w:p") {
         const mark = markRevision(c);
@@ -174,34 +197,44 @@ export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagra
           inContentControl: ctx.sdt,
           ...props,
           text: (pending?.text ?? "") + paragraphText(c, view),
+          removedMark: null,
           merged: pending ? [...pending.merged, pending.node] : [],
           node: c,
         };
         const markGone = mark !== null && !visibleRev(mark, view);
-        if (markGone) pending = record;
-        else {
+        if (markGone) {
+          record.removedMark = mark!.name;
+          pending = record;
+        } else {
           out.push(record);
           pending = null;
         }
       } else if (c.name === "w:tbl") {
-        if (pending) {
-          out.push(pending);
-          pending = null;
-        }
         const t = ctx.table ? ctx.table : { index: ++tableIndex };
         kids(c, "w:tr").forEach((tr, r) => {
-          kids(tr, "w:tc").forEach((tc, col) => visit(tc, { ...ctx, cell: true, table: { index: t.index, row: r, col } }));
+          kids(tr, "w:tc").forEach((tc, col) => {
+            // a removed mark before the table merges into the first cell's
+            // first paragraph; only that cell receives the carry
+            const left = visit(tc, { ...ctx, cell: true, table: { index: t.index, row: r, col } }, pending);
+            pending = null;
+            if (left && !(left.removedMark === "w:del" && left.text === "")) out.push(left);
+          });
         });
       } else if (c.name === "w:sdt") {
         const content = kid(c, "w:sdtContent");
-        if (content) visit(content, { ...ctx, sdt: true });
+        if (content) {
+          const left = visit(content, { ...ctx, sdt: true }, pending);
+          pending = null;
+          if (left) out.push(left);
+        }
       } else if (c.name === "w:customXml") {
-        visit(c, ctx);
+        pending = visit(c, ctx, pending);
       }
     }
-    if (pending && pending.text !== "") out.push(pending);
+    return pending;
   };
 
-  visit(walk.body, { cell: false, sdt: false });
+  const left = visit(walk.body, { cell: false, sdt: false });
+  if (left) out.push(left);
   return out;
 }

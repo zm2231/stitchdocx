@@ -70,7 +70,8 @@ export type RefusalReason =
   | "span_crosses_structure"
   | "span_in_field"
   | "span_in_content_control"
-  | "paragraph_not_editable";
+  | "paragraph_not_editable"
+  | "insert_in_plain_text_control";
 
 export interface Receipt {
   index: number;

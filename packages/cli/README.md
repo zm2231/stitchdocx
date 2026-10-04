@@ -15,10 +15,13 @@ echoes it).
 
 Assigns a valid unique `w14:paraId` to every paragraph that lacks one (and
 repairs duplicates), adds the `w14` namespace declaration when missing, and
-writes the result. Untouched parts stay byte-identical.
+writes the result. Untouched parts stay byte-identical. `protection` is the
+enforced editing restriction from `word/settings.xml` (`readOnly`,
+`comments`, `trackedChanges` or `forms`), or null — surfaced so the caller
+can ask the document owner before processing; it is never changed.
 
 ```json
-{ "assigned": 3 }
+{ "assigned": 3, "protection": null }
 ```
 
 ### `paragraphs <in.docx>`
@@ -54,7 +57,9 @@ paragraph text and `insertedAddr`.
 Refusals carry a machine-readable `reason`: `addr_not_found`,
 `span_out_of_range`, `span_text_mismatch`, `empty_text`,
 `span_overlaps_revision`, `span_overlaps_prior_op`, `span_crosses_structure`,
-`span_in_field`, `span_in_content_control`, `paragraph_not_editable`.
+`span_in_field`, `span_in_content_control`, `paragraph_not_editable`,
+`insert_in_plain_text_control` (a plain-text content control may hold only
+one paragraph).
 
 ### `finalize <in.docx> <decisions.json> <out.docx>`
 

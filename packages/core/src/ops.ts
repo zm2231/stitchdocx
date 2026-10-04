@@ -11,12 +11,13 @@ import {
   type XElement,
 } from "@stitchdocx/package-io";
 import { buildSpanMap, checkSpan, pieceAt, type SpanMap } from "./spanmap.js";
-import { markRevision, paragraphText, textContent, type View } from "./projection.js";
+import { attrVal, markRevision, paragraphText, textContent, wordText, type View } from "./projection.js";
 import {
   cloneRunPr,
   makeRun,
   newRevisionEl,
   renameEl,
+  reidRevisionRecords,
   RevisionIdAllocator,
   ParaIdAllocator,
   textToRunChildren,
@@ -60,6 +61,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     if (op.op === "insertParagraphAfter") {
       if (!op.text || op.text.trim() === "") refuse(plan, "empty_text");
       else if (op.scope === "table" && !hasAncestor(para, "w:tbl")) refuse(plan, "addr_not_found");
+      else if (!op.scope && inPlainTextControl(para)) refuse(plan, "insert_in_plain_text_control");
       else if (!op.scope && nextBlockSibling(para)?.name !== "w:p" && markRevision(para)) {
         // at a container end the insert must track the ANCHOR's paragraph
         // mark (Word's form); an anchor whose mark is already tracked by any
@@ -207,6 +209,21 @@ function hasAncestor(p: XElement, name: string): boolean {
   return false;
 }
 
+/** true when the paragraph lives inside a plain-text content control (an sdt
+ *  whose sdtPr declares w:text): such a control may hold only one paragraph,
+ *  and Word rejects the file when a second is added */
+function inPlainTextControl(p: XElement): boolean {
+  let cur = p.parent;
+  while (cur) {
+    if (cur.name === "w:sdt") {
+      const sdtPr = kid(cur, "w:sdtPr");
+      if (sdtPr && kid(sdtPr, "w:text")) return true;
+    }
+    cur = cur.parent;
+  }
+  return false;
+}
+
 // —————————————————————————————————————————————————————————————— span ops
 
 type SpanOp = Extract<Op, { op: "replace" }> | Extract<Op, { op: "delete" }>;
@@ -255,9 +272,9 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   // preserved, so offsets stay valid), and stale piece references would
   // split already-split runs and corrupt the paragraph
   let map = buildSpanMap(para, acceptAllView);
-  splitAt(map, start);
+  splitAt(map, start, () => deps.ids.take());
   map = buildSpanMap(para, acceptAllView);
-  splitAt(map, end);
+  splitAt(map, end, () => deps.ids.take());
   map = buildSpanMap(para, acceptAllView);
   const covered = map.pieces.filter((pc) => pc.start >= start && pc.end <= end);
   const runs: XElement[] = [];
@@ -336,7 +353,7 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
   run.parent = ins;
   // ensure no run straddles the insertion point, then place the ins between runs
   let map = buildSpanMap(para, acceptAllView);
-  splitAt(map, at);
+  splitAt(map, at, () => deps.ids.take());
   map = buildSpanMap(para, acceptAllView);
   const pc = pieceAt(map, at);
   let parent: XElement;
@@ -519,46 +536,48 @@ function firstRun(p: XElement): XElement | null {
  * split runs at piece boundaries, so the covered pieces after both splits
  * belong to runs that are fully covered.
  */
-function splitAt(map: SpanMap, pos: number): void {
+function splitAt(map: SpanMap, pos: number, takeId: () => string): void {
   const pc = pieceAt(map, pos);
   if (!pc) return;
   if (pc.kind === "text" && pc.start < pos && pos < pc.end) {
-    splitRun(pc.run, pc.el, pos - pc.start);
+    splitRun(pc.run, pc.el, pos - pc.start, takeId);
     return;
   }
-  if (pc.start === pos) splitBefore(pc.run, pc.el);
-  else if (pc.end === pos) splitAfter(pc.run, pc.el);
+  if (pc.start === pos) splitBefore(pc.run, pc.el, takeId);
+  else if (pc.end === pos) splitAfter(pc.run, pc.el, takeId);
 }
 
 /** split the run so `el` is the first content child of the right part */
-function splitBefore(run: XElement, el_: XElement): void {
+function splitBefore(run: XElement, el_: XElement, takeId: () => string): void {
   const parent = run.parent;
   if (!parent) return;
   const idx = run.children.indexOf(el_);
   if (idx <= 0) return;
   const leftRun = cloneNode(run);
   leftRun.children = run.children.slice(0, idx);
-  rightTo(run, parent, idx, leftRun);
+  rightTo(run, parent, idx, leftRun, takeId);
 }
 
 /** split the run so `el` is the last content child of the left part */
-function splitAfter(run: XElement, el_: XElement): void {
+function splitAfter(run: XElement, el_: XElement, takeId: () => string): void {
   const parent = run.parent;
   if (!parent) return;
   const idx = run.children.indexOf(el_);
   if (idx < 0 || idx >= run.children.length - 1) return;
   const leftRun = cloneNode(run);
   leftRun.children = run.children.slice(0, idx + 1);
-  rightTo(run, parent, idx + 1, leftRun);
+  rightTo(run, parent, idx + 1, leftRun, takeId);
 }
 
-function rightTo(run: XElement, parent: XElement, from: number, leftRun: XElement): void {
+function rightTo(run: XElement, parent: XElement, from: number, leftRun: XElement, takeId: () => string): void {
   const rightRun = cloneNode(run);
   rightRun.children = run.children.slice(from);
-  // the right half keeps a copy of the run's rPr (it is the covered/remaining content's formatting)
+  // the right half keeps a copy of the run's rPr (it is the covered/remaining content's formatting);
+  // revision records inside the copy get fresh ids — the left half keeps the originals
   const head = runPrOf(run);
   if (head && from > 0) {
     const rPrClone = cloneNode(head);
+    reidRevisionRecords(rPrClone, takeId);
     rightRun.children.unshift(rPrClone);
     rPrClone.parent = rightRun;
   }
@@ -576,19 +595,26 @@ function runPrOf(run: XElement): XElement | null {
   return first && first.kind === "el" && first.name === "w:rPr" ? first : null;
 }
 
-/** split the run whose text piece strictly contains pos (text-level split) */
-function splitRun(run: XElement, tEl: XElement, inner: number): void {
+/** split the run whose text piece strictly contains pos (text-level split).
+ *  `inner` is a Word-read offset inside the element. Each half carries the
+ *  exact characters Word reads there, under xml:space="preserve": a preserved
+ *  original keeps its raw bytes (read == raw up to newline/tab mapping), and a
+ *  plain original contributes its Word-read slices — so edge whitespace Word
+ *  drops cannot resurface at a cut, and internal whitespace cannot vanish. */
+function splitRun(run: XElement, tEl: XElement, inner: number, takeId: () => string): void {
   const parent = run.parent;
   if (!parent) return;
   const idx = parent.children.indexOf(run);
-  const decoded = textContent(tEl);
+  const source = attrVal(tEl, "xml:space") === "preserve" ? textContent(tEl) : wordText(tEl);
   const tIdx = run.children.indexOf(tEl);
   const rPr = runPrOf(run);
 
   const leftRun = cloneNode(run);
-  leftRun.children = [...run.children.slice(0, tIdx), makeText(decoded.slice(0, inner))];
+  leftRun.children = [...run.children.slice(0, tIdx), makeText(source.slice(0, inner))];
   const rightRun = cloneNode(run);
-  rightRun.children = [...(rPr ? [cloneNode(rPr)] : []), makeText(decoded.slice(inner)), ...run.children.slice(tIdx + 1)];
+  const rPrCopy = rPr ? cloneNode(rPr) : null;
+  if (rPrCopy) reidRevisionRecords(rPrCopy, takeId);
+  rightRun.children = [...(rPrCopy ? [rPrCopy] : []), makeText(source.slice(inner)), ...run.children.slice(tIdx + 1)];
   for (const c of leftRun.children) if (c.kind === "el") c.parent = leftRun;
   for (const c of rightRun.children) if (c.kind === "el") c.parent = rightRun;
 
@@ -597,8 +623,10 @@ function splitRun(run: XElement, tEl: XElement, inner: number): void {
   rightRun.parent = parent;
 }
 
-function makeText(text: string): XElement {
-  const t = el("w:t", { "xml:space": "preserve" });
+function makeText(text: string, preserve = true): XElement {
+  const t = el("w:t", preserve ? { "xml:space": "preserve" } : {});
   t.children.push(textNode(text)); // textNode escapes on the way in
   return t;
 }
+
+
