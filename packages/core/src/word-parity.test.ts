@@ -4,7 +4,7 @@
 // editing restrictions. Builders construct minimal OOXML packages in-memory.
 import { describe, expect, it } from "vitest";
 import { decodePart, encodePart, readPackage, writePackage } from "@stitchdocx/package-io";
-import { normalizeDocx, openDocument, verifyOutput, type Op } from "./index.js";
+import { normalizeDocx, openDocument, resolveSpan, verifyOutput, type Op } from "./index.js";
 
 const DATE = "2026-10-03T00:00:00Z";
 const AUTHOR = "Reviewer A";
@@ -159,6 +159,21 @@ describe("merged records are views, not edit targets", () => {
     expect(ok.receipts[0]!.status).toBe("applied");
     expect(verifyOutput(normalizeDocx(docx(body())).docx, ok.out, ok.receipts).ok).toBe(true);
     expect(openDocument(ok.out).projection().map((p) => p.text)).toEqual(["Deleted headingCell rate."]);
+  });
+
+  it("the resolver refuses to anchor into a merged record", () => {
+    const listed = openDocument(docx(body())).projection();
+    const merged = resolveSpan(listed, { containing: "Deleted heading", span: "heading" });
+    expect(merged.ok).toBe(false);
+    if (!merged.ok) expect(merged.reason).toBe("paragraph_not_editable");
+    const byAddr = resolveSpan(listed, { addr: "10000002", span: "Cell text." });
+    expect(byAddr.ok).toBe(false);
+    if (!byAddr.ok) expect(byAddr.reason).toBe("paragraph_not_editable");
+    // the cell's own region resolves once the mark is gone from the equation:
+    // a document without the removed mark resolves normally
+    const plain = openDocument(docx(`<w:tbl><w:tr><w:tc>${P("10000002", R("Cell text."))}</w:tc></w:tr></w:tbl>`)).projection();
+    const ok = resolveSpan(plain, { addr: "10000002", span: "text" });
+    expect(ok).toEqual({ ok: true, addr: "10000002", start: 5, end: 9 });
   });
 
   it("a second-pass insert skips merged records and applies on a normal one", () => {

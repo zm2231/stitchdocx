@@ -13,7 +13,7 @@ export type SpanResolution =
   | { ok: true; addr: string; start: number; end: number }
   | {
       ok: false;
-      reason: "addr_not_found" | "ambiguous_match" | "span_not_found" | "span_out_of_range" | "span_text_mismatch";
+      reason: "addr_not_found" | "ambiguous_match" | "span_not_found" | "span_out_of_range" | "span_text_mismatch" | "paragraph_not_editable";
       candidates?: Array<{ addr: string; start: number; end: number }>;
     };
 
@@ -35,6 +35,10 @@ export function resolveSpan(projection: Paragraph[], target: SpanTarget): SpanRe
     addr = p.addr;
   }
   const para = projection.find((p) => p.addr === addr)!;
+  // a record whose text spans a removed paragraph mark is a merged view: its
+  // offsets cover more than the one paragraph an op may edit, so it must not
+  // produce operations
+  if (!para.editable) return { ok: false, reason: "paragraph_not_editable" };
   const span = target.span ?? "";
   if (!span) return { ok: true, addr: addr!, start: 0, end: 0 };
   const starts: number[] = [];
