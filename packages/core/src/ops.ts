@@ -18,6 +18,7 @@ import {
   newRevisionEl,
   renameEl,
   reidRevisionRecords,
+  stripRevisionRecords,
   RevisionIdAllocator,
   ParaIdAllocator,
   textToRunChildren,
@@ -33,6 +34,11 @@ export interface ApplyDeps {
   /** revision elements created by THIS apply call — the only ones a later op
    *  may treat as its own (sibling placement); everything else is untouchable */
   ownedRevisions: Set<XElement>;
+  /** the addressed paragraph's text in projection-record space under `view` —
+   *  records merge removed-mark content, so a record can read differently
+   *  than the physical paragraph node; receipts report in record space.
+   *  Returns null when the address has no record (caller falls back). */
+  recordText(addr: Addr, view: View): string | null;
 }
 
 const acceptAllView: View = () => "accept";
@@ -174,8 +180,8 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     return {
       ...base,
       changeIds,
-      before: paragraphText(para, rejectMine),
-      after: paragraphText(para, acceptAllView),
+      before: deps.recordText(plan.op.addr, rejectMine) ?? paragraphText(para, rejectMine),
+      after: deps.recordText(plan.op.addr, acceptAllView) ?? paragraphText(para, acceptAllView),
     };
   });
 }
@@ -441,12 +447,17 @@ function applyInsertParagraph(
     const anchorPPr = kid(anchor, "w:pPr");
     for (const c of anchorPPr?.children ?? []) {
       // the saved state carries the anchor's paragraph properties; mark
-      // formatting and nested change records are not paragraph properties
-      if (c.kind === "el" && (c.name === "w:rPr" || c.name === "w:pPrChange")) continue;
+      // formatting, change records and the section break (which belongs to
+      // the anchor and must not be duplicated onto the insert) are excluded
+      if (c.kind === "el" && (c.name === "w:rPr" || c.name === "w:pPrChange" || c.name === "w:sectPr")) continue;
       const clone = cloneNode(c);
       saved.children.push(clone);
       if (clone.kind === "el") clone.parent = saved;
     }
+    // a copied property may itself carry a revision record (e.g. a
+    // w:sectPrChange nested deeper); records keep their unique ids only on
+    // their original element
+    stripRevisionRecords(saved);
     change.children.push(saved);
     saved.parent = change;
     pPr.children.push(change);
@@ -628,5 +639,3 @@ function makeText(text: string, preserve = true): XElement {
   t.children.push(textNode(text)); // textNode escapes on the way in
   return t;
 }
-
-

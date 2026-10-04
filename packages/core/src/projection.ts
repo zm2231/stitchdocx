@@ -146,6 +146,9 @@ export interface ProjectionParagraph {
    *  mark is not visible under the view ("w:del" = a deleted mark under
    *  accept, "w:ins" = an inserted mark under reject) */
   removedMark: string | null;
+  /** true when this record's text begins with content carried from a removed
+   *  mark in front of it */
+  carried: boolean;
   /** w:p elements merged into this record because their mark is not visible */
   merged: XElement[];
   node: XElement;
@@ -198,6 +201,7 @@ export function projectParagraphs(walk: BodyWalk, view: View): ProjectionParagra
           ...props,
           text: (pending?.text ?? "") + paragraphText(c, view),
           removedMark: null,
+          carried: pending !== null,
           merged: pending ? [...pending.merged, pending.node] : [],
           node: c,
         };

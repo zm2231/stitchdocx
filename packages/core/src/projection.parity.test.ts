@@ -6,7 +6,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { decodeAttrValue, decodePart, readPackage, parseXml, kid } from "@stitchdocx/package-io";
+import { decodeAttrValue, decodePart, mainPartName, readPackage, parseXml, kid } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { projectParagraphs, type View } from "./projection.js";
 
@@ -35,7 +35,7 @@ function* docxFiles(dir: string): Generator<string> {
  *  normalizes the same way on both sides of the comparison. */
 function revisionAuthors(bytes: Uint8Array): Set<string> {
   const entries = readPackage(bytes);
-  const tree = parseXml(decodePart(entries.get("word/document.xml")!));
+  const tree = parseXml(decodePart(entries.get(mainPartName(entries))!));
   const authors = new Set<string>();
   const visit = (node: any): void => {
     for (const c of node.children) {
@@ -60,7 +60,7 @@ const VIEWS: Array<{ name: string; mine: "accept" | "reject"; reader: "accept" |
 
 function ourProject(bytes: Uint8Array, view: View) {
   const entries = readPackage(bytes);
-  const tree = parseXml(decodePart(entries.get("word/document.xml")!));
+  const tree = parseXml(decodePart(entries.get(mainPartName(entries))!));
   const root = kid(tree as any, "w:document")!;
   return projectParagraphs(walkBody(root), view);
 }

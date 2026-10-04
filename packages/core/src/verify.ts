@@ -2,7 +2,7 @@
 // receipts claim: every applied receipt's changeIds exist, rejecting them
 // yields `before`, accepting them yields `after`, and no other paragraph
 // differs. Tampering anywhere fails.
-import { decodeEntities, decodePart, readPackage, parseXml, kid, serializeXml } from "@stitchdocx/package-io";
+import { decodeEntities, decodePart, mainPartName, readPackage, parseXml, kid, serializeXml } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { acceptAll, attrVal, markRevision, paragraphText, projectParagraphs, type View } from "./projection.js";
 import type { Addr, Receipt } from "./types.js";
@@ -67,7 +67,10 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
       failures.push(`receipt ${r.index}: addressed paragraph ${r.addr} missing from output`);
       continue;
     }
-    const rejectedText = paragraphText(target.node, rejectMine);
+    // receipts report in projection-record space: a removed mark may merge
+    // other paragraphs' content into this record under either view
+    const rejectedRecord = projectParagraphs(outDoc.walk, rejectMine).find((rec) => rec.addr === r.addr);
+    const rejectedText = rejectedRecord ? rejectedRecord.text : paragraphText(target.node, rejectMine);
     if (rejectedText !== r.before) failures.push(`receipt ${r.index}: reject yields ${JSON.stringify(rejectedText)}, expected before ${JSON.stringify(r.before ?? "")}`);
     if (target.text !== r.after) failures.push(`receipt ${r.index}: accept yields ${JSON.stringify(target.text)}, expected after ${JSON.stringify(r.after ?? "")}`);
   }
@@ -113,8 +116,8 @@ export function verifyOutput(original: Uint8Array, output: Uint8Array, receipts:
 
 function openForVerify(bytes: Uint8Array) {
   const entries = readPackage(bytes);
-  const docXml = entries.get("word/document.xml");
-  if (!docXml) throw new Error("word/document.xml missing");
+  const docXml = entries.get(mainPartName(entries));
+  if (!docXml) throw new Error("main document part missing");
   const tree = parseXml(decodePart(docXml));
   const root = kid(tree as any, "w:document");
   if (!root) throw new Error("word/document.xml has no w:document root");

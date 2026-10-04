@@ -136,6 +136,108 @@ describe("text boxes are neither listed nor edited", () => {
   });
 });
 
+describe("merged records are views, not edit targets", () => {
+  const body = (tail = ""): string =>
+    P("10000001", R("Deleted heading"), `<w:rPr><w:del w:id="90" w:author="Client Author" w:date="${DATE}"/></w:rPr>`) +
+    `<w:tbl><w:tr><w:tc>${P("10000002", R("Cell text."))}</w:tc></w:tr></w:tbl>` + tail;
+
+  it("the merged listing reports itself, and ops use the cell's own offsets", () => {
+    const doc = openDocument(docx(body()));
+    const listed = doc.projection();
+    expect(listed.map((p) => p.text)).toEqual(["Deleted headingCell text."]);
+    expect(listed[0]!.editable).toBe(false);
+    expect(listed[0]!.readOnlyReason).toBe("merged_removed_mark");
+    // offsets authored against the merged view cannot address one paragraph
+    const refused = doc.apply([
+      { op: "delete", ref: "m", author: AUTHOR, addr: "10000002", start: 15, end: 19, expectText: "text" },
+    ], { date: DATE });
+    expect(refused[0]!.status).toBe("refused");
+    // offsets in the cell paragraph's own space still edit it
+    const ok = runApply(body(), [
+      { op: "replace", ref: "c", author: AUTHOR, addr: "10000002", start: 5, end: 9, expectText: "text", text: "rate" },
+    ]);
+    expect(ok.receipts[0]!.status).toBe("applied");
+    expect(verifyOutput(normalizeDocx(docx(body())).docx, ok.out, ok.receipts).ok).toBe(true);
+    expect(openDocument(ok.out).projection().map((p) => p.text)).toEqual(["Deleted headingCell rate."]);
+  });
+
+  it("a second-pass insert skips merged records and applies on a normal one", () => {
+    const listed = openDocument(docx(body(P("10000003", R("Tail paragraph."))))).projection();
+    expect(listed.map((p) => p.addr)).toEqual(["10000002", "10000003"]);
+    expect(listed[1]!.editable).toBe(true);
+    const ins = runApply(body(), [
+      { op: "insertParagraphAfter", ref: "i", author: AUTHOR, addr: "10000002", text: "Inserted." },
+    ]);
+    expect(ins.receipts[0]!.status).toBe("applied");
+  });
+});
+
+describe("clones never duplicate revision ids", () => {
+  it("the saved pPr copy excludes the anchor's section break and its records", () => {
+    const sect = `<w:sectPr><w:type w:val="nextPage"/><w:sectPrChange w:id="5" w:author="Client Author" w:date="${DATE}"><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:sectPrChange></w:sectPr>`;
+    const bodyWithChange = P("10000001", R("Final paragraph."), sect);
+    const ins = runApply(bodyWithChange, [
+      { op: "insertParagraphAfter", ref: "i", author: AUTHOR, addr: "10000001", text: "New clause." },
+    ]);
+    expect(ins.receipts[0]!.status).toBe("applied");
+    const xml = xmlOf(ins.out);
+    // the client's sectPrChange id survives exactly once, on the anchor
+    expect([...xml.matchAll(/w:sectPrChange w:id="5"/g)]).toHaveLength(1);
+    expect(new Set([...xml.matchAll(/<(w:sectPrChange|w:rPrChange|w:pPrChange) w:id="(\d+)"/g)].map((m) => m[2]!)).size)
+      .toBe([...xml.matchAll(/<(w:sectPrChange|w:rPrChange|w:pPrChange) w:id="(\d+)"/g)].length);
+    // the inserted paragraph carries no section break
+    const inserted = xml.slice(xml.indexOf(`w14:paraId="${ins.receipts[0]!.insertedAddr}"`));
+    expect(inserted.slice(0, inserted.indexOf("</w:p>"))).not.toContain("w:sectPr");
+    expect(verifyOutput(normalizeDocx(docx(bodyWithChange)).docx, ins.out, ins.receipts).ok).toBe(true);
+  });
+
+  it("an element-boundary split re-ids the copied rPr records too", () => {
+    const body = P("10000001",
+      `<w:r><w:rPr><w:i/><w:rPrChange w:id="17" w:author="Client Author" w:date="${DATE}"><w:rPr/></w:rPrChange></w:rPr>` +
+      `<w:t xml:space="preserve">ab</w:t><w:t xml:space="preserve">cd</w:t></w:r>`);
+    const { receipts, out } = runApply(body, [
+      { op: "replace", ref: "f", author: AUTHOR, addr: "10000001", start: 1, end: 3, expectText: "bc", text: "X" },
+    ]);
+    expect(receipts[0]!.status).toBe("applied");
+    const xml = xmlOf(out);
+    const ids = [...xml.matchAll(/<w:rPrChange w:id="(\d+)"/g)].map((m) => m[1]!);
+    expect(ids.filter((id) => id === "17")).toHaveLength(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(verifyOutput(normalizeDocx(docx(body)).docx, out, receipts).ok).toBe(true);
+  });
+});
+
+describe("Word's reading extends to deletions, entities and nesting", () => {
+  it("unpreserved deleted text reads with the same whitespace rules", () => {
+    const body = P("10000001", R("Keep ") + `<w:del w:id="90" w:author="Client Author" w:date="${DATE}"><w:r><w:t>  gone  </w:t></w:r></w:del>` + R("."));
+    const doc = openDocument(docx(body));
+    expect(textsOf(docx(body), "accept")).toEqual(["Keep ."]);
+    expect(textsOf(docx(body), "reject")).toEqual(["Keep gone."]);
+  });
+
+  it("entities and multiple text children follow the same path", () => {
+    const body = P("10000001", `<w:r><w:t>  a &amp; b</w:t></w:r>`);
+    const doc = openDocument(docx(body));
+    expect(doc.projection()[0]!.text).toBe("a & b");
+  });
+
+  it("a plain-text control inside a table cell refuses; scope table still inserts after the table", () => {
+    const cell = `<w:tc><w:tcPr/><w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent>${P("10000002", R("Control text."))}</w:sdtContent></w:sdt></w:tc>`;
+    const body = `<w:tbl><w:tr>${cell}</w:tr></w:tbl>` + P("10000003", R("After."));
+    const doc = openDocument(normalizeDocx(docx(body)).docx);
+    const refused = doc.apply([
+      { op: "insertParagraphAfter", ref: "a", author: AUTHOR, addr: "10000002", text: "No." },
+    ], { date: DATE });
+    expect(refused[0]!.status).toBe("refused");
+    expect(refused[0]!.reason).toBe("insert_in_plain_text_control");
+    const scoped = runApply(body, [
+      { op: "insertParagraphAfter", ref: "b", author: AUTHOR, addr: "10000002", text: "After the table.", scope: "table" },
+    ]);
+    expect(scoped.receipts[0]!.status).toBe("applied");
+    expect(verifyOutput(normalizeDocx(docx(body)).docx, scoped.out, scoped.receipts).ok).toBe(true);
+  });
+});
+
 describe("splits keep Word's reading of untouched bytes stable", () => {
   it("an internal-space element splits without changing what Word drops or shows", () => {
     const body = P("10000001", PLAIN("a   b"));

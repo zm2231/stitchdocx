@@ -9,6 +9,7 @@ import {
   getAttr,
   kid,
   kids,
+  mainPartName,
   readPackage,
   setAttr,
   writePackage,
@@ -29,6 +30,7 @@ const treeAsEl = (d: unknown) => d as XElement;
 
 export class Document {
   private entries: Entries;
+  private mainPart: string;
   private tree: ReturnType<typeof parseXml>;
   private root: XElement;
   private walk: BodyWalk;
@@ -42,8 +44,9 @@ export class Document {
   private constructor(bytes: Uint8Array) {
     this.originalBytes = bytes;
     this.entries = readPackage(bytes);
-    const docXml = this.entries.get("word/document.xml");
-    if (!docXml) throw new Error("word/document.xml missing");
+    this.mainPart = mainPartName(this.entries);
+    const docXml = this.entries.get(this.mainPart);
+    if (!docXml) throw new Error(`${this.mainPart} missing`);
     this.tree = parseXml(decodePart(docXml));
     this.root = kid(treeAsEl(this.tree), "w:document")!;
     if (!this.root) throw new Error("word/document.xml has no w:document root");
@@ -73,11 +76,16 @@ export class Document {
 
   private toPublicParagraph(p: ProjectionParagraph): Paragraph {
     const kind: Paragraph["kind"] = p.container === "cell" ? "cell" : p.numbered ? "listItem" : /(^|[^a-z])heading|title/i.test(p.style ?? "") ? "heading" : "body";
+    // a record whose text includes content carried across a removed mark (its
+    // own or a preceding paragraph's) is a merged VIEW: its offsets span more
+    // than the one paragraph an op may edit, so it is not addressable as listed
+    const mergedView = p.removedMark !== null || p.carried;
     const out: Paragraph = {
       addr: p.addr ?? "",
       text: p.text,
       kind,
-      editable: true,
+      editable: !mergedView,
+      readOnlyReason: mergedView ? "merged_removed_mark" : undefined,
     };
     if (p.table) out.table = p.table;
     if (p.style) out.style = p.style;
@@ -94,6 +102,7 @@ export class Document {
   }
 
   apply(ops: Op[], opts: { date: string }): Receipt[] {
+    this.recordTextCache = null;
     const deps: ApplyDeps = {
       paraByAddr: this.paraByAddr,
       ids: this.ids,
@@ -102,12 +111,29 @@ export class Document {
       // ownership is scoped to THIS apply batch: revisions from earlier calls
       // are pre-existing tracked changes and must refuse, not reposition
       ownedRevisions: new Set<XElement>(),
+      recordText: (addr, view) => this.recordText(addr, view),
     };
     const receipts = executeApply(deps, ops);
     if (receipts.some((r) => r.status === "applied")) this.markDirty();
     // register paragraphs created by inserts so later calls can address them
     for (const r of receipts) if (r.insertedAddr) this.paraByAddr.set(r.insertedAddr, this.findByAddrIn(r.insertedAddr)!);
     return receipts;
+  }
+
+  /** record-space text for receipts; the acceptAll walk is cached per apply */
+  private recordTextCache: { view: View; byAddr: Map<Addr, string> } | null = null;
+
+  private recordText(addr: Addr, view: View): string | null {
+    if (view === acceptAll) {
+      if (this.recordTextCache === null) {
+        const byAddr = new Map<Addr, string>();
+        for (const rec of projectParagraphs(this.walk, view)) if (rec.addr) byAddr.set(rec.addr, rec.text);
+        this.recordTextCache = { view, byAddr };
+      }
+      return this.recordTextCache.byAddr.get(addr) ?? null;
+    }
+    for (const rec of projectParagraphs(this.walk, view)) if (rec.addr === addr) return rec.text;
+    return null;
   }
 
   private findByAddrIn(addr: Addr): XElement | null {
@@ -299,7 +325,7 @@ export class Document {
 
   save(): Uint8Array {
     if (!this.dirty) return this.originalBytes;
-    this.entries.set("word/document.xml", encodePart(serializeXml(this.tree)));
+    this.entries.set(this.mainPart, encodePart(serializeXml(this.tree)));
     return writePackage(this.entries);
   }
 }

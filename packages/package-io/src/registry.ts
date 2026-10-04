@@ -1,6 +1,7 @@
 // Light part registry: [Content_Types].xml and relationship parts. The gate
 // never adds or removes parts, so this exists to answer "what is this part"
 // questions and to keep door open for later phases (comments, headers).
+import { decodePart, type Entries } from "./zip.js";
 import { decodeEntities, kid, kids, parseXml, serializeXml, type XElement, type XDoc } from "./xml.js";
 
 export interface ContentTypes {
@@ -48,6 +49,36 @@ export function parseRels(xml: string): Relationship[] {
     if (id && type && target) out.push({ id, type, target, targetMode: get("TargetMode") });
   }
   return out;
+}
+
+// Transitional and Strict OOXML name relationship types under different URIs.
+const REL_BASES = [
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships/",
+  "http://purl.oclc.org/ooxml/officeDocument/relationships/",
+];
+
+/** The part a relationship of `type` points to from `source` ("" for the
+ *  package), resolved per OPC: an absolute target is package-relative, any
+ *  other is relative to the source's folder. Null when absent or external. */
+export function relatedPart(entries: Entries, source: string, type: string): string | null {
+  const slash = source.lastIndexOf("/");
+  const dir = source.slice(0, slash + 1);
+  const relsXml = entries.get(`${dir}_rels/${source.slice(slash + 1)}.rels`);
+  if (!relsXml) return null;
+  const rel = parseRels(decodePart(relsXml)).find(
+    (r) => r.targetMode !== "External" && REL_BASES.some((ns) => r.type === ns + type),
+  );
+  if (!rel) return null;
+  const parts = (rel.target.startsWith("/") ? rel.target.slice(1) : dir + rel.target).split("/");
+  const out: string[] = [];
+  for (const x of parts) (x === ".." ? out.pop() : x !== "." && out.push(x));
+  return out.join("/");
+}
+
+/** the main document part, named through the package's officeDocument
+ *  relationship; the conventional name is the fallback */
+export function mainPartName(entries: Entries): string {
+  return relatedPart(entries, "", "officeDocument") ?? "word/document.xml";
 }
 
 export { parseXml, serializeXml };

@@ -5,7 +5,7 @@
 // No structural repair happens here: the parser is total (it opens anything
 // well-formed, including an empty body-level w:sectPr that other runtimes
 // choke on), so a rewrite would only break the untouched-bytes guarantee.
-import { getAttr, kid, readPackage, setAttr, writePackage, encodePart, decodePart, type Entries, type XElement } from "@stitchdocx/package-io";
+import { getAttr, kid, mainPartName, readPackage, relatedPart, setAttr, writePackage, encodePart, decodePart, type Entries, type XElement } from "@stitchdocx/package-io";
 import { parseXml, serializeXml } from "@stitchdocx/package-io";
 import { walkBody } from "./body.js";
 import { ParaIdAllocator } from "./revisions.js";
@@ -16,7 +16,8 @@ export const W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml";
  *  enforced w:documentProtection with a known mode counts; the document is
  *  never modified here — callers surface the restriction to the user. */
 export function readProtection(entries: Entries): string | null {
-  const settingsXml = entries.get("word/settings.xml");
+  const settingsPart = relatedPart(entries, mainPartName(entries), "settings") ?? "word/settings.xml";
+  const settingsXml = entries.get(settingsPart);
   if (!settingsXml) return null;
   const tree = parseXml(decodePart(settingsXml));
   const settings = kid(tree as unknown as XElement, "w:settings");
@@ -31,8 +32,9 @@ export function readProtection(entries: Entries): string | null {
 
 export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: number; protection: string | null } {
   const entries: Entries = readPackage(bytes);
-  const docXml = entries.get("word/document.xml");
-  if (!docXml) throw new Error("word/document.xml missing");
+  const mainPart = mainPartName(entries);
+  const docXml = entries.get(mainPart);
+  if (!docXml) throw new Error(`${mainPart} missing`);
   const tree = parseXml(decodePart(docXml));
   const root = kid(tree as unknown as XElement, "w:document");
   if (!root) throw new Error("word/document.xml has no w:document root");
@@ -61,7 +63,7 @@ export function normalizeDocx(bytes: Uint8Array): { docx: Uint8Array; assigned: 
     if (!hasNs) setAttr(root, "xmlns:w14", W14_NS);
   }
   if (assigned > 0) {
-    entries.set("word/document.xml", encodePart(serializeXml(tree)));
+    entries.set(mainPart, encodePart(serializeXml(tree)));
     return { docx: writePackage(entries), assigned, protection: readProtection(entries) };
   }
   return { docx: bytes, assigned: 0, protection: readProtection(entries) };

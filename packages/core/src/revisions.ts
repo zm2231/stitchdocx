@@ -150,12 +150,12 @@ export function cloneRunPr(run: XElement | null): XElement | null {
   const rPr = run ? kid(run, "w:rPr") : null;
   if (!rPr) return null;
   const clone = cloneNode(rPr) as XElement;
-  dropRevisionRecords(clone);
+  stripRevisionRecords(clone);
   return clone;
 }
 
 /** remove every revision element anywhere inside `root` (in place) */
-function dropRevisionRecords(root: XElement): void {
+export function stripRevisionRecords(root: XElement): void {
   const drop = (node: XElement): void => {
     node.children = node.children.filter((c) => !(c.kind === "el" && isRevisionEl(c)));
     for (const c of node.children) if (c.kind === "el") drop(c);
