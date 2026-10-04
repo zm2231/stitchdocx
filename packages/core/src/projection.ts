@@ -224,6 +224,12 @@ export function markRevision(p: XElement): XElement | null {
   return kids(rPr).find((c) => REVISION_NAMES.has(c.name)) ?? null;
 }
 
+/** every revision on a paragraph's mark, in source order */
+function markRevisions(p: XElement): XElement[] {
+  const rPr = kid(kid(p, "w:pPr"), "w:rPr");
+  return rPr ? kids(rPr).filter((c) => REVISION_NAMES.has(c.name)) : [];
+}
+
 /** a w:numPr as written: numId and ilvl values, each null when absent */
 export interface NumPrRef {
   numId: string | null;
@@ -295,9 +301,11 @@ export function projectParagraphs(walk: BodyWalk, view: View, styles: StyleSheet
           merged: pending ? [...pending.merged, pending.node] : [],
           node: c,
         };
-        const markGone = mark !== null && !visibleRev(mark, view);
-        if (markGone) {
-          record.removedMark = mark!.name;
+        // a mark inserted and later deleted carries both revisions, and is
+        // removed under either view
+        const hidden = mark ? markRevisions(content).find((r) => !visibleRev(r, view)) : undefined;
+        if (hidden) {
+          record.removedMark = hidden.name;
           pending = record;
         } else {
           out.push(record);

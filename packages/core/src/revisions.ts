@@ -16,6 +16,7 @@ import {
   type XNode,
 } from "@stitchdocx/package-io";
 import { REVISION_NAMES, markRevision } from "./projection.js";
+import { cellsOf, rowRevision, rowsOf } from "./body.js";
 
 export const REVISION_ALL = [...REVISION_NAMES, "w:rPrChange", "w:pPrChange", "w:sectPrChange", "w:tblPrChange", "w:tcPrChange", "w:trPrChange"];
 
@@ -246,22 +247,21 @@ export function resolveRevisions(root: XElement, match: (rev: XElement) => boole
       n++; // already gone: it lived inside a paragraph removed earlier in this pass
       continue;
     }
+    const markOf = markParagraph(t);
     if (t.name === "w:ins" || t.name === "w:moveTo") {
       if (decision === "accept") {
         const parent = t.parent;
         if (parent && parent.name === "w:rPr") removeChild(t); // paragraph mark
         else unwrap(t);
-      } else {
-        const rPr = t.parent;
-        const pPr = rPr?.parent;
-        const para = pPr?.parent;
-        if (rPr && rPr.name === "w:rPr" && pPr && pPr.name === "w:pPr" && para && para.name === "w:p") {
-          rejectParagraphMark(para, t, targetSet, root);
-        } else removeChild(t);
-      }
+      } else if (markOf) rejectParagraphMark(markOf, t, targetSet, root);
+      else if (t.parent?.name === "w:trPr") removeRow(t.parent.parent!);
+      else removeChild(t);
     } else if (t.name === "w:del" || t.name === "w:moveFrom") {
-      if (decision === "accept") removeChild(t);
-      else {
+      if (decision === "accept") {
+        if (markOf) acceptDeletedMark(markOf, t, targetSet);
+        else if (t.parent?.name === "w:trPr") removeRow(t.parent.parent!);
+        else removeChild(t);
+      } else {
         for (const d of descendants(t)) if (d.name === "w:delText") renameEl(d, "w:t");
         unwrap(t);
       }
@@ -369,6 +369,138 @@ function rejectParagraphMark(para: XElement, mark: XElement, rejected: Set<XElem
   }
   // container end, or a table follows: Word cannot remove the mark either
   removeChild(mark);
+}
+
+/** the paragraph whose mark `rev` tracks (rev sits in w:p/w:pPr/w:rPr), else null */
+function markParagraph(rev: XElement): XElement | null {
+  const rPr = rev.parent;
+  const pPr = rPr?.parent;
+  const para = pPr?.parent;
+  return rPr?.name === "w:rPr" && pPr?.name === "w:pPr" && para?.name === "w:p" ? para : null;
+}
+
+/**
+ * Accept the deleted (or moved-away) mark `mark` on `para`, the way the accept
+ * projection reads it: the paragraph's content joins the next paragraph in
+ * reader order, taking that paragraph's properties. A paragraph before a table
+ * joins the first paragraph of the table's first remaining cell, and one before
+ * a content control joins the control's first paragraph. With no paragraph to
+ * join (the end of the body or of a content control) the paragraph stays and
+ * only its mark is untracked. At the end of a cell, a paragraph left empty
+ * disappears when a paragraph before it can close the cell.
+ */
+function acceptDeletedMark(para: XElement, mark: XElement, accepted: ReadonlySet<XElement>): void {
+  const gone = (tr: XElement) => {
+    const rev = rowRevision(tr);
+    return rev !== null && rev.name === "w:del" && accepted.has(rev);
+  };
+  const next = nextParagraphInFlow(para, gone);
+  if (next === "cellEnd") {
+    const before = previousElement(para);
+    if (before?.name === "w:p" && !hasAcceptedText(para)) removeChild(para);
+    else removeChild(mark);
+    return;
+  }
+  if (!next) {
+    removeChild(mark);
+    return;
+  }
+  const at = next.children[0] && next.children[0].kind === "el" && next.children[0].name === "w:pPr" ? 1 : 0;
+  const moving = para.children.filter((c) => !(c.kind === "el" && c.name === "w:pPr"));
+  next.children.splice(at, 0, ...moving);
+  for (const c of moving) if (c.kind === "el") c.parent = next;
+  removeChild(para);
+}
+
+/** the paragraph that reader order reaches after `from`, "cellEnd" when it
+ *  reaches the end of a table cell first, or null at the end of the body or a
+ *  content control */
+function nextParagraphInFlow(from: XElement, rowGone: (tr: XElement) => boolean): XElement | "cellEnd" | null {
+  let cur = from;
+  for (;;) {
+    const parent = cur.parent;
+    if (!parent) return null;
+    const siblings = parent.children;
+    for (let i = siblings.indexOf(cur) + 1; i < siblings.length; i++) {
+      const c = siblings[i]!;
+      if (c.kind !== "el") continue;
+      const found = firstParagraphIn(c, rowGone);
+      if (found !== undefined) return found;
+    }
+    if (parent.name !== "w:customXml") return parent.name === "w:tc" ? "cellEnd" : null;
+    cur = parent;
+  }
+}
+
+/** the first paragraph reader order reaches entering block `c`; null when the
+ *  flow stops inside it; undefined when it passes over `c` */
+function firstParagraphIn(c: XElement, rowGone: (tr: XElement) => boolean): XElement | null | undefined {
+  if (c.name === "w:p") return c;
+  if (c.name === "w:tbl") {
+    for (const tr of rowsOf(c)) {
+      if (rowGone(tr)) continue;
+      const tc = cellsOf(tr)[0];
+      if (!tc) continue;
+      return firstInContainer(tc, rowGone) ?? null;
+    }
+    return undefined;
+  }
+  if (c.name === "w:sdt") {
+    const content = kid(c, "w:sdtContent");
+    return content ? (firstInContainer(content, rowGone) ?? null) : undefined;
+  }
+  if (c.name === "w:customXml") return firstInContainer(c, rowGone);
+  return undefined;
+}
+
+function firstInContainer(node: XElement, rowGone: (tr: XElement) => boolean): XElement | null | undefined {
+  for (const c of node.children) {
+    if (c.kind !== "el") continue;
+    const found = firstParagraphIn(c, rowGone);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function previousElement(e: XElement): XElement | null {
+  const siblings = e.parent?.children ?? [];
+  for (let i = siblings.indexOf(e) - 1; i >= 0; i--) {
+    const c = siblings[i]!;
+    if (c.kind === "el") return c;
+  }
+  return null;
+}
+
+const TEXT_CHARS = new Set(["w:t", "w:sym", "w:tab", "w:ptab", "w:br", "w:cr", "w:noBreakHyphen"]);
+
+/** whether `para` shows any character once its deletions are accepted */
+function hasAcceptedText(para: XElement): boolean {
+  const visit = (node: XElement): boolean => {
+    for (const c of node.children) {
+      if (c.kind !== "el" || c.name === "w:pPr" || c.name === "w:del" || c.name === "w:moveFrom") continue;
+      if (TEXT_CHARS.has(c.name) || visit(c)) return true;
+    }
+    return false;
+  };
+  return visit(para);
+}
+
+/** remove a table row; a table left without rows goes too, and a cell left
+ *  without a closing paragraph gets an empty one */
+function removeRow(tr: XElement): void {
+  const tbl = tr.parent;
+  removeChild(tr);
+  if (!tbl || tbl.name !== "w:tbl" || rowsOf(tbl).length > 0) return;
+  const holder = tbl.parent;
+  removeChild(tbl);
+  if (holder?.name === "w:tc") {
+    const last = [...holder.children].reverse().find((c) => c.kind === "el");
+    if (!last || last.kind !== "el" || last.name !== "w:p") {
+      const p = el("w:p", {});
+      p.parent = holder;
+      holder.children.push(p);
+    }
+  }
 }
 
 function attached(e: XElement, root: XElement): boolean {

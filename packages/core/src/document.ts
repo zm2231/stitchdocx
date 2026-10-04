@@ -28,12 +28,12 @@ import { parseMainPart, walkBody, type BodyWalk } from "./body.js";
 import { acceptAll, attrVal, paragraphText, projectParagraphs, REVISION_NAMES, type ProjectionParagraph, type View } from "./projection.js";
 import { buildSpanMap } from "./spanmap.js";
 import { executeApply, splitAt, type ApplyDeps } from "./ops.js";
-import { mayHoldRevisionId, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun } from "./revisions.js";
+import { mayHoldRevisionId, ParaIdAllocator, resolveRevisions, RevisionIdAllocator, textToRunChildren, makeRun, REVISION_ID_NAMES } from "./revisions.js";
 import { normalizeDocx } from "./normalize.js";
 import { StyleSheet } from "./styles.js";
 import { NumberingModel, parseNumberingModel } from "./numbering.js";
-import { maxRevisionIdAcrossParts, paraIdsAcrossParts } from "./parts.js";
-import { mainPartSource } from "./limits.js";
+import { maxRevisionIdAcrossParts, paraIdsAcrossParts, wordprocessingPartNames } from "./parts.js";
+import { mainPartSource, parsePart } from "./limits.js";
 import type { Addr, Decision, DecisionResult, Op, Paragraph, Receipt } from "./types.js";
 
 /** the parsed document root is an XDoc; kid() works on it identically */
@@ -258,6 +258,36 @@ export class Document {
     return results;
   }
 
+  /**
+   * Accept every tracked change in every story part: the body, headers,
+   * footers, footnotes, endnotes and comments. Afterwards the document holds
+   * no tracked change of any kind, and the body reads as its accept projection
+   * did before. Cell, numbering and table-grid changes, which decide() cannot
+   * name, are accepted too: a deleted cell goes, the others keep their current
+   * form.
+   */
+  acceptAllChanges(): void {
+    this.assertUsable();
+    for (const p of [...pendingElements(this.root)]) if (TRACKED.test(pendingSource(p)!)) materialize(p);
+    acceptEverything(this.root);
+    this.walk = walkBody(this.root);
+    this.paraByAddr = new Map();
+    for (const p of this.walk.paragraphs) {
+      const addr = getAttr(p, "w14:paraId");
+      if (addr !== null) this.paraByAddr.set(addr, p);
+    }
+    for (const part of wordprocessingPartNames(this.reader, this.mainPart).slice(1)) {
+      const source = this.reader.xml(part);
+      if (source === undefined || !TRACKED.test(source)) continue;
+      const tree = parsePart(source);
+      const partRoot = kid(treeAsEl(tree));
+      if (!partRoot) continue;
+      acceptEverything(partRoot);
+      this.entries.set(part, encodePart(serializeXml(tree)));
+    }
+    this.markDirty();
+  }
+
   private broken: string | null = null;
 
   private assertUsable(): void {
@@ -417,6 +447,31 @@ function removeChildEl(parent: XElement, child: XElement): void {
   if (i >= 0) parent.children.splice(i, 1);
 }
 
+/** source that may hold a tracked change of any kind */
+const TRACKED = new RegExp(`<(?:${[...REVISION_ID_NAMES, "w:tblGridChange"].join("|")})[\\s/>]`);
+
+/** accept every tracked change under a fully parsed `root` */
+function acceptEverything(root: XElement): void {
+  resolveRevisions(root, () => true, "accept");
+  const leftovers: XElement[] = [];
+  const visit = (node: XElement): void => {
+    for (const c of node.children) {
+      if (c.kind !== "el") continue;
+      if (REVISION_ID_NAMES.has(c.name) || c.name === "w:tblGridChange") leftovers.push(c);
+      else if (isPending(c)) continue; // its source holds no tracked change
+      else visit(c);
+    }
+  };
+  visit(root);
+  for (const rev of leftovers) {
+    if (rev.name === "w:cellDel") {
+      const tc = rev.parent?.parent;
+      if (tc?.name === "w:tc") removeChildEl(tc.parent!, tc);
+    }
+    if (rev.parent) removeChildEl(rev.parent, rev);
+  }
+}
+
 /** revision elements outside unparsed paragraphs */
 function* allRevisions(root: XElement): Generator<XElement> {
   const stack: XElement[] = [root];
@@ -443,6 +498,13 @@ export function finalizeDocx(bytes: Uint8Array, decisions: Decision[]): { docx: 
   const doc = Document.open(bytes);
   const results = doc.decide(decisions);
   return { docx: doc.save(), results };
+}
+
+/** The document with every tracked change accepted, in every story part. */
+export function acceptAllDocx(bytes: Uint8Array): Uint8Array {
+  const doc = Document.open(bytes);
+  doc.acceptAllChanges();
+  return doc.save();
 }
 
 export { normalizeDocx };
