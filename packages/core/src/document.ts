@@ -212,6 +212,19 @@ export class Document {
     return null;
   }
 
+  /** every revision element in the body that decide() can name, with its
+   *  w:id and w:author as written; one id can name several elements */
+  revisions(): Array<{ id: string; author: string | null; name: string }> {
+    this.assertUsable();
+    for (const p of [...pendingElements(this.root)]) if (TRACKED.test(pendingSource(p)!)) materialize(p);
+    const out: Array<{ id: string; author: string | null; name: string }> = [];
+    for (const rev of allRevisions(this.root)) {
+      const id = getAttr(rev, "w:id");
+      if (id !== null) out.push({ id, author: getAttr(rev, "w:author"), name: rev.name });
+    }
+    return out;
+  }
+
   /**
    * Resolve each decision's revisions, named by the receipt's changeIds.
    * Throws, naming the decision, when an id is not a revision in the
