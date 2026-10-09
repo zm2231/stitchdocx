@@ -198,10 +198,11 @@ export function cloneRunPr(run: XElement | null): XElement | null {
   return clone;
 }
 
-/** remove every revision element anywhere inside `root` (in place) */
+/** remove every revision element and every other w:id-carrying change record
+ *  anywhere inside `root` (in place): a copy must not repeat an id */
 export function stripRevisionRecords(root: XElement): void {
   const drop = (node: XElement): void => {
-    node.children = node.children.filter((c) => !(c.kind === "el" && isRevisionEl(c)));
+    node.children = node.children.filter((c) => !(c.kind === "el" && (isRevisionEl(c) || REVISION_ID_NAMES.has(c.name))));
     for (const c of node.children) if (c.kind === "el") drop(c);
   };
   drop(root);

@@ -428,6 +428,26 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       });
     }
 
+    for (const [form, after] of [["before another paragraph", P("10000002", R("Next"))], ["at the end of the body", ""]] as const) {
+      it(`never repeats a revision id copied from the source's properties ${form}`, () => {
+        const NUMBERED = `<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/><w:numberingChange w:id="7" w:author="Client" w:date="${DATE}" w:original="%1."/></w:numPr></w:pPr>`;
+        const body = P("10000001", NUMBERED + R("First")) + after;
+        const { docx: norm } = normalizeDocx(docx(body));
+        const doc = openDocument(norm);
+        const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second", formatFrom: "10000001" }], { date: DATE });
+        expect(receipts[0]!.status).toBe("applied");
+        const out = doc.save();
+        const xml = new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
+        const ids = [...xml.matchAll(/<w:[A-Za-z]+ w:id="(\d+)"/g)].map((m) => m[1]);
+        expect(new Set(ids).size).toBe(ids.length);
+        expect(insertedPPr(out, receipts[0]!.insertedAddr!)).toContain("<w:numId w:val=\"1\"/>");
+        expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+        const rejected = openDocument(out);
+        rejected.decide([{ ref: "f", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
+        expect(rejected.projection().map((p) => p.text)).toEqual(after ? ["First", "Next"] : ["First"]);
+      });
+    }
+
     it("takes properties and character formatting from another paragraph than the anchor", () => {
       const HEAD = `<w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Role</w:t></w:r>`;
       const body = P("10000001", HEAD) + P("10000002", LIST + R("Bullet")) + P("10000003", R("Next"));
