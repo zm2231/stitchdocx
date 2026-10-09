@@ -84,11 +84,12 @@ needs a non-empty `author`. Ops (all require `flagId`, `author`, `addr`):
   — track-deletes `[start,end)` and track-inserts `text` after it. With
   `"granularity": "word"` only the changed tokens are struck.
 - `{ "op": "delete", "addr", "start", "end", "expectText" }`
-- `{ "op": "insertParagraphAfter", "addr", "text", "scope"?, "inheritFormat"? }`
+- `{ "op": "insertParagraphAfter", "addr", "text", "scope"?, "formatFrom"? }`
   — a new tracked-inserted paragraph after `addr` (or after the containing
-  table with `"scope": "table"`). With `"inheritFormat": true` it takes the
-  anchor's paragraph properties (style, list, spacing), as pressing Enter in
-  Word does.
+  table with `"scope": "table"`). With `"formatFrom": "<addr>"` it takes that
+  paragraph's properties (style, list, spacing) and its first run's character
+  formatting, as pressing Enter after it in Word does; an address that is not
+  listed refuses with `addr_not_found`.
 
 Spans are in the paragraph's original text coordinates and must match
 `expectText` exactly — address only records listed with `editable: true`

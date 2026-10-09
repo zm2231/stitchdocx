@@ -87,6 +87,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     }
     if (op.op === "insertParagraphAfter") {
       if (!op.text || op.text.trim() === "") refuse(plan, "empty_text");
+      else if (op.formatFrom !== undefined && (!deps.paraByAddr.has(op.formatFrom) || deps.addressable(op.formatFrom) === "unlisted")) refuse(plan, "addr_not_found");
       else if (op.scope === "table" && !hasAncestor(para, "w:tbl")) refuse(plan, "addr_not_found");
       else if (op.scope !== "table" && inPlainTextControl(para)) refuse(plan, "insert_in_plain_text_control");
       else if (op.scope !== "table" && nextBlockSibling(para)?.name !== "w:p" && markRevision(para)) {
@@ -484,6 +485,7 @@ function applyInsertParagraph(
   form: { followsParagraph: boolean },
 ): { insertedAddr: string; ids: string[]; element: XElement } {
   const anchor = deps.paraByAddr.get(op.addr)!;
+  const formatSource = op.formatFrom === undefined ? null : deps.paraByAddr.get(op.formatFrom)!;
   const chainKey = chainKeyOf(op, anchor);
   const effectiveAfter = chains.get(chainKey) ?? chainKey;
   const author = op.author;
@@ -510,8 +512,8 @@ function applyInsertParagraph(
     const pPr = el("w:pPr");
     const change = newRevisionEl("w:pPrChange", changeId, author, deps.date);
     const saved = el("w:pPr");
-    for (const c of anchorProperties(anchor)) adopt(saved, c);
-    if (op.inheritFormat) for (const c of anchorProperties(anchor)) adopt(pPr, c);
+    for (const c of portableProperties(anchor)) adopt(saved, c);
+    if (formatSource) for (const c of portableProperties(formatSource)) adopt(pPr, c);
     change.children.push(saved);
     saved.parent = change;
     pPr.children.push(change);
@@ -527,7 +529,7 @@ function applyInsertParagraph(
     const runId = deps.ids.take();
     ids.push(markId, runId);
     const pPr = el("w:pPr");
-    if (op.inheritFormat) for (const c of anchorProperties(anchor)) adopt(pPr, c);
+    if (formatSource) for (const c of portableProperties(formatSource)) adopt(pPr, c);
     markIns = newRevisionEl("w:ins", markId, author, deps.date);
     const rPr = el("w:rPr");
     rPr.children.push(markIns);
@@ -540,7 +542,7 @@ function applyInsertParagraph(
 
   const runId = ids[ids.length - 1]!;
   const runIns = newRevisionEl("w:ins", runId, author, deps.date);
-  const anchorRunPr = deps.styles.insertedRunPr(firstRun(anchor), p);
+  const anchorRunPr = deps.styles.insertedRunPr(firstRun(formatSource ?? anchor), p);
   const run = makeRun(anchorRunPr, textToRunChildren(op.text));
   runIns.children.push(run);
   run.parent = runIns;
@@ -558,13 +560,13 @@ function applyInsertParagraph(
   return { insertedAddr: addr, ids, element: p };
 }
 
-/** copies of the anchor's paragraph properties a new paragraph can carry:
- *  mark formatting, change records and the section break (which must not be
- *  duplicated onto the insert) stay with the anchor; a copied property's own
- *  revision record keeps its unique id only on the original */
-function anchorProperties(anchor: XElement): XNode[] {
+/** copies of a paragraph's properties a new paragraph can carry: mark
+ *  formatting, change records and the section break (which must not be
+ *  duplicated onto the insert) stay put; a copied property's own revision
+ *  record keeps its unique id only on the original */
+function portableProperties(source: XElement): XNode[] {
   const holder = el("w:pPr");
-  for (const c of kid(anchor, "w:pPr")?.children ?? []) {
+  for (const c of kid(source, "w:pPr")?.children ?? []) {
     if (c.kind === "el" && (c.name === "w:rPr" || c.name === "w:pPrChange" || c.name === "w:sectPr")) continue;
     adopt(holder, cloneNode(c));
   }

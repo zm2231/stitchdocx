@@ -402,7 +402,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     }
   });
 
-  describe("insertParagraphAfter with inheritFormat", () => {
+  describe("insertParagraphAfter with formatFrom", () => {
     const LIST = `<w:pPr><w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:rPr><w:b/></w:rPr></w:pPr>`;
     const insertedPPr = (out: Uint8Array, addr: string) => {
       const xml = new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
@@ -415,7 +415,7 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       it(`gives the new paragraph the anchor's properties ${form}`, () => {
         const { docx: norm } = normalizeDocx(docx(body));
         const doc = openDocument(norm);
-        const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second", inheritFormat: true }], { date: DATE });
+        const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second", formatFrom: "10000001" }], { date: DATE });
         expect(receipts[0]!.status).toBe("applied");
         const out = doc.save();
         const pPr = insertedPPr(out, receipts[0]!.insertedAddr!);
@@ -427,6 +427,28 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
         expect(rejected.projection().map((p) => p.text)).toEqual(body.includes("Next") ? ["First", "Next"] : ["First"]);
       });
     }
+
+    it("takes properties and character formatting from another paragraph than the anchor", () => {
+      const HEAD = `<w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Role</w:t></w:r>`;
+      const body = P("10000001", HEAD) + P("10000002", LIST + R("Bullet")) + P("10000003", R("Next"));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000002", text: "New role", formatFrom: "10000001" }], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      const out = doc.save();
+      const pPr = insertedPPr(out, receipts[0]!.insertedAddr!);
+      expect(pPr).toContain(`<w:pStyle w:val="Heading2"/>`);
+      expect(pPr).not.toContain("<w:numPr>");
+      const xml = new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
+      expect(xml).toMatch(/<w:ins [^>]*><w:r><w:rPr><w:b\/><\/w:rPr><w:t xml:space="preserve">New role/);
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    });
+
+    it("refuses a formatFrom that names no paragraph", () => {
+      const body = P("10000001", LIST + R("First")) + P("10000002", R("Next"));
+      const { receipts } = runOn(body, [{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second", formatFrom: "7FFFFFFE" }]);
+      expect(receipts[0]).toMatchObject({ status: "refused", reason: "addr_not_found" });
+    });
 
     it("leaves the new paragraph's properties empty without it", () => {
       const body = P("10000001", LIST + R("First")) + P("10000002", R("Next"));

@@ -54,8 +54,9 @@ export type Op =
       addr: Addr;
       text: string;
       scope?: "paragraph" | "table";
-      /** the new paragraph takes the anchor's paragraph properties (style, list, spacing), as pressing Enter in Word does */
-      inheritFormat?: boolean;
+      /** the new paragraph takes this paragraph's properties (style, list, spacing) and
+       *  its first run's character formatting, as pressing Enter after it in Word does */
+      formatFrom?: Addr;
     };
 
 export type RefusalReason =
