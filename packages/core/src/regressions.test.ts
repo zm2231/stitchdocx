@@ -371,6 +371,30 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     });
 
+    it("writes a rewritten line as one replacement", () => {
+      const before = "Storyteller | Technology Enthusiast | Lifelong Learner";
+      const { docx: norm } = normalizeDocx(docx(P("10000001", R(before))));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, "Solutions Engineer turning technical depth into clear buyer value")], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(receipts[0]!.changeIds).toHaveLength(2);
+      expect(verifyOutput(norm, doc.save(), receipts).ok).toBe(true);
+    });
+
+    it("falls back to word edits when one replacement would span two links", () => {
+      const LINK2 = (text: string) => `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r2">${R(text)}</w:hyperlink>`;
+      const before = "LinkedIn | GitHub";
+      const body = P("10000001", LINK("LinkedIn") + R(" | ") + LINK2("GitHub"));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, "Profile | Code")], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(doc.projection()[0]!.text).toBe("Profile | Code");
+      const out = doc.save();
+      expect(xmlOf(out).match(/<w:hyperlink /g)).toHaveLength(2);
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    });
+
     it("still refuses a changed token that straddles the link boundary", () => {
       const before = "site.me• a@b.com";
       const body = P("10000001", LINK("site.me") + R("• a@b.com"));

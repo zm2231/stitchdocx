@@ -4,16 +4,16 @@
 // whitespace when matching (jsdiff's diffWords) violates both and silently
 // drops a leading space from insertions after the last old token.
 import { describe, expect, it } from "vitest";
-import { wordEdits } from "./worddiff.js";
+import { readableWordEdits, wordEdits, type WordEdit } from "./worddiff.js";
 
 /** rebuild newText from oldText + edits; the slices taken between edit
  *  coordinates are exactly the matched parts, so this asserts both contract
  *  halves: matched parts are old substrings at the assumed offsets, and the
  *  edits reproduce newText */
-function reconstruct(oldText: string, newText: string): string {
+function reconstruct(oldText: string, newText: string, diff: (o: string, n: string) => WordEdit[] = wordEdits): string {
   let out = "";
   let off = 0;
-  for (const e of wordEdits(oldText, newText)) {
+  for (const e of diff(oldText, newText)) {
     if (e.insAt !== undefined) {
       if (e.insAt < off) throw new Error(`insertion at ${e.insAt} precedes consumed offset ${off}`);
       out += oldText.slice(off, e.insAt);
@@ -55,7 +55,7 @@ describe("wordEdits contract", () => {
     expect(reconstruct("removed", "")).toBe("");
   });
 
-  it("matches the contract on 10,000 random old/new pairs", { timeout: 60_000 }, () => {
+  it.each([["wordEdits", wordEdits], ["readableWordEdits", readableWordEdits]] as const)("%s matches the contract on 10,000 random old/new pairs", { timeout: 60_000 }, (_name, diff) => {
     const TOKENS = [
       "alpha", "Bravo", "$12,500", "net-30", "Client", "deliverables", "within ten (10) days",
       "§4.2", "“quoted”", "é", "\u00A0", " ", "  ", "\t", "\n", "(", ")", ".", ",", "x", "Q5", "2026",
@@ -74,7 +74,7 @@ describe("wordEdits contract", () => {
       }
       let recon: string;
       try {
-        recon = reconstruct(oldText, newText);
+        recon = reconstruct(oldText, newText, diff);
       } catch (err) {
         throw new Error(`pair ${i}: ${JSON.stringify({ oldText, newText })}: ${String(err)}`);
       }
@@ -84,3 +84,30 @@ describe("wordEdits contract", () => {
     }
   });
 });
+
+describe("readableWordEdits", () => {
+  it("turns a rewritten sentence into one replacement", () => {
+    const before = "Storyteller | Technology Enthusiast | Lifelong Learner";
+    const after = "Solutions Engineer turning technical depth into clear buyer value";
+    expect(readableWordEdits(before, after)).toEqual([
+      { delStart: 0, delEnd: before.length },
+      { insAt: before.length, insText: after },
+    ]);
+    expect(wordEdits(before, after).length).toBeGreaterThan(2);
+  });
+
+  it("keeps word-level edits when most of the wording stays", () => {
+    const edits = readableWordEdits("Led value-based demos for enterprise buyers", "Led tailored demos for 40 enterprise buyers");
+    expect(edits).toEqual([
+      { delStart: 4, delEnd: 15 },
+      { insAt: 15, insText: "tailored" },
+      { insAt: 26, insText: "40 " },
+    ]);
+    expect(readableWordEdits("net-30 days", "net-45 days")).toEqual(wordEdits("net-30 days", "net-45 days"));
+  });
+
+  it("folds a separator-only gap between two changes", () => {
+    expect(readableWordEdits("A | B", "C | D")).toEqual([{ delStart: 0, delEnd: 5 }, { insAt: 5, insText: "C | D" }]);
+  });
+});
+

@@ -23,7 +23,7 @@ import {
   ParaIdAllocator,
   textToRunChildren,
 } from "./revisions.js";
-import { wordEdits } from "./worddiff.js";
+import { readableWordEdits, wordEdits, type WordEdit } from "./worddiff.js";
 import type { StyleSheet } from "./styles.js";
 import type { Addr, Op, Receipt } from "./types.js";
 
@@ -58,6 +58,8 @@ interface Plan {
   status: "applied" | "refused";
   reason?: Receipt["reason"];
   result?: { changeIds: string[]; insertedAddr?: string };
+  /** the word-granularity edits validation accepted, applied as validated */
+  edits?: WordEdit[];
 }
 
 export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
@@ -124,7 +126,8 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       refuse(plan, "empty_text");
       continue;
     }
-    const issue = spanIssue(map, op, priorApplied.get(op.addr) ?? [], ownedRevisions);
+    const { issue, edits } = spanIssue(map, op, priorApplied.get(op.addr) ?? [], ownedRevisions);
+    plan.edits = edits;
     if (issue) {
       refuse(plan, issue.reason);
       continue;
@@ -154,7 +157,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       return pb.start - pa.start;
     });
     for (const plan of list) {
-      changeIdsByIndex.set(plan.index, applySpanOp(deps, para, plan.op as SpanOp));
+      changeIdsByIndex.set(plan.index, applySpanOp(deps, para, plan.op as SpanOp, plan.edits));
     }
   }
   const insertChains = new Map<XElement, XElement>();
@@ -212,16 +215,24 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
   });
 }
 
-// word granularity mutates only the changed tokens, so only those ranges are checked
-function spanIssue(map: SpanMap, op: Extract<Op, { op: "replace" | "delete" }>, prior: Array<{ start: number; end: number }>, owned: ReadonlySet<XElement>): ReturnType<typeof checkSpan> {
-  if (op.op !== "replace" || op.granularity !== "word") return checkSpan(map, op.start, op.end, prior, owned);
-  for (const e of wordEdits(op.expectText, op.text)) {
-    const start = op.start + (e.delStart ?? e.insAt ?? 0);
-    const end = e.delEnd !== undefined ? op.start + e.delEnd : start;
-    const issue = checkSpan(map, start, end, prior, owned);
-    if (issue) return issue;
-  }
-  return null;
+// word granularity mutates only the changed tokens, so only those ranges are
+// checked; the readable grouping is preferred, and the finest edits are the
+// fallback when grouping would reach into a link or other fixed structure
+function spanIssue(map: SpanMap, op: Extract<Op, { op: "replace" | "delete" }>, prior: Array<{ start: number; end: number }>, owned: ReadonlySet<XElement>): { issue: ReturnType<typeof checkSpan>; edits?: WordEdit[] } {
+  if (op.op !== "replace" || op.granularity !== "word") return { issue: checkSpan(map, op.start, op.end, prior, owned) };
+  const firstIssue = (edits: WordEdit[]) => {
+    for (const e of edits) {
+      const start = op.start + (e.delStart ?? e.insAt ?? 0);
+      const end = e.delEnd !== undefined ? op.start + e.delEnd : start;
+      const issue = checkSpan(map, start, end, prior, owned);
+      if (issue) return issue;
+    }
+    return null;
+  };
+  const readable = readableWordEdits(op.expectText, op.text);
+  if (!firstIssue(readable)) return { issue: null, edits: readable };
+  const finest = wordEdits(op.expectText, op.text);
+  return { issue: firstIssue(finest), edits: finest };
 }
 
 function refuse(plan: Plan, reason: NonNullable<Receipt["reason"]>): void {
@@ -280,11 +291,11 @@ function inPlainTextControl(p: XElement): boolean {
 
 type SpanOp = Extract<Op, { op: "replace" }> | Extract<Op, { op: "delete" }>;
 
-function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp): string[] {
+function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, validated?: WordEdit[]): string[] {
   if (op.op === "delete") return applyDeletion(deps, para, op.start, op.end, op.author).ids;
   if (op.granularity === "word") {
     const ids: string[] = [];
-    const edits = wordEdits(op.expectText, op.text);
+    const edits = validated ?? wordEdits(op.expectText, op.text);
     const ordered = [...edits].sort((a, b) => {
       const pa = a.delStart ?? a.insAt ?? 0;
       const pb = b.delStart ?? b.insAt ?? 0;
