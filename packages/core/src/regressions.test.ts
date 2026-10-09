@@ -447,6 +447,26 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     });
 
+    it("gives inserted words the formatting of the text before them, as typing in Word does", () => {
+      const BOLD = "<w:rPr><w:b/></w:rPr>";
+      const ITALIC = "<w:rPr><w:i/></w:rPr>";
+      const dated = runOn(P("10000001", R("Acme | September 2023 - Present", BOLD)), [word("Acme | September 2023 - Present", "Acme | September 2023 - May 2025")]);
+      expect(xmlOf(dated.out)).toMatch(/<w:ins [^>]*><w:r><w:rPr><w:b\/><\/w:rPr><w:t xml:space="preserve">May 2025<\/w:t>/);
+      const tagline = "Storyteller | Technology Enthusiast | Lifelong Learner";
+      const rewritten = runOn(P("10000001", R(tagline, ITALIC)), [word(tagline, "Solutions Engineer turning technical depth into clear buyer value")]);
+      expect(xmlOf(rewritten.out)).toMatch(/<w:ins [^>]*><w:r><w:rPr><w:i\/><\/w:rPr><w:t xml:space="preserve">Solutions Engineer/);
+    });
+
+    it("formats text added before a link like the plain text, and text added inside a link like the link", () => {
+      const STYLED = (text: string) => `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>${text}</w:t></w:r></w:hyperlink>`;
+      const body = P("10000001", STYLED("site.me") + R(" today", "<w:rPr><w:b/></w:rPr>"));
+      const before = runOn(body, [word("site.me today", "Visit site.me today")]);
+      expect(xmlOf(before.out)).toMatch(/<w:ins [^>]*><w:r><w:rPr><w:b\/><\/w:rPr><w:t xml:space="preserve">Visit <\/w:t><\/w:r><\/w:ins><w:hyperlink /);
+      const inside = runOn(body, [word("site.me today", "site.new.me today")]);
+      expect(inside.receipts[0]!.after).toBe("site.new.me today");
+      expect(xmlOf(inside.out)).toMatch(/<w:hyperlink [^>]*>[^]*<w:ins [^>]*><w:r><w:rPr><w:rStyle w:val="Hyperlink"\/><\/w:rPr><w:t xml:space="preserve">[^<]*new[^<]*<\/w:t>[^]*<\/w:hyperlink>/);
+    });
+
     it("edits a changed token that straddles the link boundary on both sides of it", () => {
       const before = "site.me• a@b.com";
       const { docx: norm } = normalizeDocx(docx(P("10000001", LINK("site.me") + R("• a@b.com"))));

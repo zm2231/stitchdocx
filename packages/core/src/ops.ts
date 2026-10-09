@@ -434,12 +434,10 @@ function leadingStructure(map: SpanMap, run: XElement, at: number): XElement | n
   return outer;
 }
 
-/** point insertion at a text offset (word-diff insertions, empty-span replace) */
+/** point insertion at a text offset (word-diff insertions, empty-span replace).
+ *  Like typing in Word, the text takes the formatting of the visible text just
+ *  before it in the same parent, else just after it */
 function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string): string {
-  const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
-  const run = makeRun(deps.styles.insertedRunPr(null, para), textToRunChildren(text));
-  ins.children.push(run);
-  run.parent = ins;
   // ensure no run straddles the insertion point, then place the ins between runs
   let map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   splitAt(map, at, () => deps.ids.take());
@@ -469,6 +467,12 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
     parent = rev.parent;
     index = parent.children.indexOf(rev) + (pc && pc.start < at ? 1 : 0);
   }
+  const sameParent = map.pieces.filter((o) => o.end > o.start && o.run.parent === parent && !o.inFieldResult);
+  const formatRun = sameParent.filter((o) => o.end <= at).at(-1)?.run ?? sameParent.find((o) => o.start >= at)?.run ?? null;
+  const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
+  const run = makeRun(deps.styles.insertedRunPr(formatRun, para), textToRunChildren(text));
+  ins.children.push(run);
+  run.parent = ins;
   parent.children.splice(index, 0, ins);
   ins.parent = parent;
   deps.ownedRevisions.add(ins);

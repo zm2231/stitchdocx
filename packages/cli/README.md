@@ -75,7 +75,10 @@ listed: a run's own `w:vanish` decides, else the paragraph and character
 style chains combine by exclusive or, else `docDefaults` (`w:specVanish` and
 `w:webHidden` text prints in Word and is listed). Engine insertions stay
 visible, with an explicit `w:vanish w:val="0"` where copied formatting would
-hide them. A table row the client tracked as inserted or deleted is
+hide them. Inserted words take the formatting of the visible text just before
+them in the same parent (else just after), as typing in Word does, so a word
+added inside a link looks like the link and one added beside it does not.
+A table row the client tracked as inserted or deleted is
 shown or dropped per Word's accept/reject rules, and spans inside a tracked
 row refuse with `span_overlaps_revision`.
 
