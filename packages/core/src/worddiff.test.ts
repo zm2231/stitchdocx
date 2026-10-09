@@ -128,4 +128,18 @@ describe("readableWordEdits", () => {
     expect(edits).toEqual([{ delStart: 0, delEnd: oldText.length }, { insAt: oldText.length, insText: newText }]);
     expect(grouped).toBeLessThan(diffOnly * 2 + 50);
   });
+
+  it("turns a line changed in several places into one replacement when little of it stays", () => {
+    const before = "www.linkedin.com/in/sample• sample@example.com • (555) 010-0199 ";
+    const after = "Austin, TX | sample@example.com | (555) 010-0199 | linkedin.com/in/sample";
+    expect(wordEdits(before, after).length).toBeGreaterThan(4);
+    expect(readableWordEdits(before, after)).toEqual([{ delStart: 0, delEnd: before.length }, { insAt: before.length, insText: after }]);
+  });
+
+  it("keeps a few small edits word-level when most of the line stays", () => {
+    const before = "Led 5 demos for 10 enterprise buyers in 3 regions every quarter";
+    const after = "Led 8 demos for 12 enterprise buyers in 4 regions every quarter";
+    expect(readableWordEdits(before, after)).toEqual(wordEdits(before, after));
+    expect(readableWordEdits(before, after).filter((e) => e.insText !== undefined)).toHaveLength(3);
+  });
 });

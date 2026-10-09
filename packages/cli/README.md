@@ -92,7 +92,12 @@ needs a non-empty `author`. Ops (all require `flagId`, `author`, `addr`):
 
 - `{ "op": "replace", "addr", "start", "end", "expectText", "text", "granularity"? }`
   — track-deletes `[start,end)` and track-inserts `text` after it. With
-  `"granularity": "word"` only the changed tokens are struck.
+  `"granularity": "word"` only the changed words are struck, grouped for a
+  reader: a short unchanged word or bare punctuation between two changes is
+  folded into them, and a span changed in three or more places that keeps less
+  than two thirds of its wording becomes one replacement. When a grouped
+  change would reach into a field or another fixed element, the finest
+  word-level changes are used instead.
 - `{ "op": "delete", "addr", "start", "end", "expectText" }`
 - `{ "op": "insertParagraphAfter", "addr", "text", "scope"?, "formatFrom"? }`
   — a new tracked-inserted paragraph after `addr` (or after the containing

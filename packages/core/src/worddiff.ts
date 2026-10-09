@@ -47,6 +47,7 @@ interface Region {
 }
 
 const WORD_CHAR = /[\p{L}\p{N}]/u;
+const SCATTERED_CHANGES = 3;
 const size = (r: Region): number => Math.max(r.oldEnd - r.oldStart, r.newEnd - r.newStart);
 
 /**
@@ -55,7 +56,9 @@ const size = (r: Region): number => Math.max(r.oldEnd - r.oldStart, r.newEnd - r
  * than both neighbouring changes, so a rewritten sentence reads as one
  * replacement rather than alternating word swaps around kept spaces and
  * separators. Folding only grows changes, so folding greedily from the left
- * reaches the same result as any order, in linear time.
+ * reaches the same result as any order, in linear time. A text still changed
+ * in several places that keeps less than two thirds of its old wording reads
+ * as a rewrite, so it becomes one replacement.
  * The result keeps the wordEdits contract.
  */
 export function readableWordEdits(oldText: string, newText: string): WordEdit[] {
@@ -87,6 +90,11 @@ export function readableWordEdits(oldText: string, newText: string): WordEdit[] 
       before.oldEnd = after.oldEnd;
       before.newEnd = after.newEnd;
     }
+  }
+  const changes = stack.filter((r) => r.changed).length;
+  const kept = stack.reduce((sum, r) => (r.changed ? sum : sum + r.oldEnd - r.oldStart), 0);
+  if (changes >= SCATTERED_CHANGES && kept * 3 < oldText.length * 2) {
+    return [{ delStart: 0, delEnd: oldText.length }, { insAt: oldText.length, insText: newText }];
   }
   const edits: WordEdit[] = [];
   for (const r of stack) {
