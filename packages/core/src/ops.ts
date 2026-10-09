@@ -302,12 +302,17 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, validated?: Wo
       if (pb !== pa) return pb - pa;
       return (a.delStart !== undefined ? 0 : 1) - (b.delStart !== undefined ? 0 : 1);
     });
+    // an insertion at the end of a deleted region replaces that region and
+    // takes its formatting; it runs first (higher offset), while the region
+    // is still visible
+    const replacedFrom = new Map(edits.filter((e) => e.delStart !== undefined && e.delEnd !== undefined).map((e) => [e.delEnd!, e.delStart!]));
     for (const e of ordered) {
       if (e.delStart !== undefined && e.delEnd !== undefined && e.delEnd > e.delStart) {
         ids.push(...applyDeletion(deps, para, op.start + e.delStart, op.start + e.delEnd, op.author).ids);
       }
       if (e.insAt !== undefined && e.insText) {
-        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author));
+        const from = replacedFrom.get(e.insAt);
+        ids.push(applyPointInsertion(deps, para, op.start + e.insAt, e.insText, op.author, from === undefined ? undefined : op.start + from));
       }
     }
     return ids;
@@ -435,9 +440,11 @@ function leadingStructure(map: SpanMap, run: XElement, at: number): XElement | n
 }
 
 /** point insertion at a text offset (word-diff insertions, empty-span replace).
- *  Like typing in Word, the text takes the formatting of the visible text just
- *  before it in the same parent, else just after it */
-function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string): string {
+ *  Text that replaces [replacedFrom, at) takes the formatting of the first
+ *  replaced run in the same parent; otherwise, like typing in Word, the text
+ *  takes the formatting of the visible text just before it in the same parent,
+ *  else just after it */
+function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string, replacedFrom?: number): string {
   // ensure no run straddles the insertion point, then place the ins between runs
   let map = buildSpanMap(para, acceptAllView, deps.styles, deps.fieldEntry(para));
   splitAt(map, at, () => deps.ids.take());
@@ -468,7 +475,8 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
     index = parent.children.indexOf(rev) + (pc && pc.start < at ? 1 : 0);
   }
   const sameParent = map.pieces.filter((o) => o.end > o.start && o.run.parent === parent && !o.inFieldResult);
-  const formatRun = sameParent.filter((o) => o.end <= at).at(-1)?.run ?? sameParent.find((o) => o.start >= at)?.run ?? null;
+  const replaced = replacedFrom === undefined ? undefined : sameParent.find((o) => o.start >= replacedFrom && o.end <= at);
+  const formatRun = replaced?.run ?? sameParent.filter((o) => o.end <= at).at(-1)?.run ?? sameParent.find((o) => o.start >= at)?.run ?? null;
   const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
   const run = makeRun(deps.styles.insertedRunPr(formatRun, para), textToRunChildren(text));
   ins.children.push(run);
