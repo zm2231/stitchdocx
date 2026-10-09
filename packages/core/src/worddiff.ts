@@ -38,51 +38,61 @@ export function wordEdits(oldText: string, newText: string): WordEdit[] {
 
 interface Region {
   changed: boolean;
-  old: string;
-  new: string;
+  oldStart: number;
+  oldEnd: number;
+  newStart: number;
+  newEnd: number;
+  /** an unchanged region holding a letter or digit */
+  wordy: boolean;
 }
 
 const WORD_CHAR = /[\p{L}\p{N}]/u;
-const size = (r: Region): number => Math.max(r.old.length, r.new.length);
+const size = (r: Region): number => Math.max(r.oldEnd - r.oldStart, r.newEnd - r.newStart);
 
 /**
  * wordEdits for a reader: an unchanged stretch between two changes is folded
- * into one change when it holds no letter or digit, or is shorter than both
- * neighbouring changes, so a rewritten sentence reads as one replacement
- * rather than alternating word swaps around kept spaces and separators.
+ * into one change when it holds no letter or digit, or is strictly shorter
+ * than both neighbouring changes, so a rewritten sentence reads as one
+ * replacement rather than alternating word swaps around kept spaces and
+ * separators. Folding only grows changes, so folding greedily from the left
+ * reaches the same result as any order, in linear time.
  * The result keeps the wordEdits contract.
  */
 export function readableWordEdits(oldText: string, newText: string): WordEdit[] {
-  let regions: Region[] = [];
+  const stack: Region[] = [];
+  let oldOff = 0;
+  let newOff = 0;
   for (const part of diffWordsWithSpace(oldText, newText)) {
     const changed = Boolean(part.added || part.removed);
-    const last = regions[regions.length - 1];
-    const region = last && last.changed && changed ? last : null;
-    const target = region ?? { changed, old: "", new: "" };
-    if (!region) regions.push(target);
-    if (!part.added) target.old += part.value;
-    if (!part.removed) target.new += part.value;
-  }
-  for (let merged = true; merged; ) {
-    merged = false;
-    for (let i = 1; i + 1 < regions.length; i++) {
-      const [before, kept, after] = [regions[i - 1]!, regions[i]!, regions[i + 1]!];
-      if (kept.changed || !before.changed || !after.changed) continue;
-      if (WORD_CHAR.test(kept.old) && kept.old.length > Math.min(size(before), size(after))) continue;
-      regions.splice(i - 1, 3, { changed: true, old: before.old + kept.old + after.old, new: before.new + kept.new + after.new });
-      merged = true;
-      break;
+    const oldLen = part.added ? 0 : part.value.length;
+    const newLen = part.removed ? 0 : part.value.length;
+    const last = stack[stack.length - 1];
+    if (last && last.changed === changed) {
+      last.oldEnd += oldLen;
+      last.newEnd += newLen;
+      last.wordy ||= !changed && WORD_CHAR.test(part.value);
+    } else {
+      stack.push({ changed, oldStart: oldOff, oldEnd: oldOff + oldLen, newStart: newOff, newEnd: newOff + newLen, wordy: !changed && WORD_CHAR.test(part.value) });
+    }
+    oldOff += oldLen;
+    newOff += newLen;
+    if (!changed) continue;
+    while (stack.length >= 3) {
+      const after = stack[stack.length - 1]!;
+      const kept = stack[stack.length - 2]!;
+      const before = stack[stack.length - 3]!;
+      if (kept.changed || !before.changed) break;
+      if (kept.wordy && kept.oldEnd - kept.oldStart >= Math.min(size(before), size(after))) break;
+      stack.length -= 2;
+      before.oldEnd = after.oldEnd;
+      before.newEnd = after.newEnd;
     }
   }
   const edits: WordEdit[] = [];
-  let oldOff = 0;
-  for (const r of regions) {
-    const start = oldOff;
-    oldOff += r.old.length;
+  for (const r of stack) {
     if (!r.changed) continue;
-    if (r.old) edits.push({ delStart: start, delEnd: oldOff });
-    if (r.new) edits.push({ insAt: oldOff, insText: r.new });
+    if (r.oldEnd > r.oldStart) edits.push({ delStart: r.oldStart, delEnd: r.oldEnd });
+    if (r.newEnd > r.newStart) edits.push({ insAt: r.oldEnd, insText: newText.slice(r.newStart, r.newEnd) });
   }
   return edits;
 }
-

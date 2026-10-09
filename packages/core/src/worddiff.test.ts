@@ -109,5 +109,23 @@ describe("readableWordEdits", () => {
   it("folds a separator-only gap between two changes", () => {
     expect(readableWordEdits("A | B", "C | D")).toEqual([{ delStart: 0, delEnd: 5 }, { insAt: 5, insText: "C | D" }]);
   });
-});
 
+  it("keeps a kept word that is as long as a neighbouring change", () => {
+    expect(readableWordEdits("aaa x bbb", "AAA x BBB")).toEqual(wordEdits("aaa x bbb", "AAA x BBB"));
+    expect(readableWordEdits("alpha x bravo", "ALPHA x BRAVO")).toEqual([{ delStart: 0, delEnd: 13 }, { insAt: 13, insText: "ALPHA x BRAVO" }]);
+  });
+
+  it("adds no more than linear work on top of the diff for a long alternating rewrite", () => {
+    const oldText = Array.from({ length: 1000 }, (_, i) => `old${i} k`).join(" ") + " closing words";
+    const newText = Array.from({ length: 1000 }, (_, i) => `NEW${i} k`).join(" ") + " CLOSING WORDS";
+    const timed = (diff: () => WordEdit[]): [WordEdit[], number] => {
+      const t0 = performance.now();
+      const edits = diff();
+      return [edits, performance.now() - t0];
+    };
+    const [, diffOnly] = timed(() => wordEdits(oldText, newText));
+    const [edits, grouped] = timed(() => readableWordEdits(oldText, newText));
+    expect(edits).toEqual([{ delStart: 0, delEnd: oldText.length }, { insAt: oldText.length, insText: newText }]);
+    expect(grouped).toBeLessThan(diffOnly * 2 + 50);
+  });
+});
