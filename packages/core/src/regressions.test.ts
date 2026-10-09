@@ -322,6 +322,75 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     expect(doc.projection()[0]!.text).toBe("ABYCD");
   });
 
+  describe("word granularity around a hyperlink", () => {
+    const LINK = (text: string) => `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1">${R(text)}</w:hyperlink>`;
+    const word = (expectText: string, text: string, granularity: "word" | "span" = "word"): Op => ({
+      op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 0, end: expectText.length, expectText, text, granularity,
+    });
+    const xmlOf = (out: Uint8Array) => new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
+
+    it("rewrites the text around an unchanged link", () => {
+      const before = "Profile site.me • a@b.com";
+      const body = P("10000001", R("Profile ") + LINK("site.me") + R(" • a@b.com"));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, "Portfolio site.me • c@d.com")], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(doc.projection()[0]!.text).toBe("Portfolio site.me • c@d.com");
+      const out = doc.save();
+      expect(xmlOf(out)).toMatch(/<w:hyperlink [^>]*><w:r><w:t xml:space="preserve">site\.me<\/w:t><\/w:r><\/w:hyperlink>/);
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+      const span = runOn(body, [word(before, "Portfolio site.me • c@d.com", "span")]);
+      expect(span.receipts[0]!.reason).toBe("span_crosses_structure");
+    });
+
+    it("removes link text and adds text before the link without moving it into the link", () => {
+      const before = "www.site.me/in/x• a@b.com • (555) 010-0100 ";
+      const after = "Austin, TX • a@b.com • (555) 010-0100 • site.me/in/x";
+      const body = P("10000001", LINK("www.site.me/in/x") + R("• a@b.com • (555) 010-0100 "));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, after)], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(receipts[0]!.before).toBe(before);
+      expect(receipts[0]!.after).toBe(after);
+      const out = doc.save();
+      expect(xmlOf(out).match(/<w:hyperlink [\s\S]*?<\/w:hyperlink>/)![0]).not.toContain("<w:ins ");
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    });
+
+    it("places text inserted at the link's leading edge before the link", () => {
+      const before = "site.me today";
+      const body = P("10000001", LINK("site.me") + R(" today"));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, "Visit site.me today")], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      const out = doc.save();
+      expect(xmlOf(out)).toMatch(/<w:ins [^>]*><w:r><w:t xml:space="preserve">Visit <\/w:t><\/w:r><\/w:ins><w:hyperlink /);
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+    });
+
+    it("still refuses a changed token that straddles the link boundary", () => {
+      const before = "site.me• a@b.com";
+      const body = P("10000001", LINK("site.me") + R("• a@b.com"));
+      const { receipts } = runOn(body, [word(before, "site.ca/ a@b.com")]);
+      expect(receipts[0]!.status).toBe("refused");
+      expect(receipts[0]!.reason).toBe("span_crosses_structure");
+    });
+  });
+
+  it("lists each revision with its paragraph's address", () => {
+    const body = P("10000001", R("Alpha beta")) + P("10000002", R("Gamma"));
+    const { docx: norm } = normalizeDocx(docx(body));
+    const doc = openDocument(norm);
+    const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000002", start: 0, end: 5, expectText: "Gamma", text: "Delta" }], { date: DATE });
+    const listed = openDocument(doc.save()).revisions();
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.every((r) => r.addr === "10000002")).toBe(true);
+    expect(listed.map((r) => r.id).sort()).toEqual([...receipts[0]!.changeIds].sort());
+  });
+
   it("rejecting a property change restores the saved props (no merge)", () => {
     const body = P("10000001", `<w:r><w:rPr><w:b/><w:rPrChange w:id="91" w:author="Reviewer A [m]" w:date="${DATE}"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>` + R("kept") + `</w:r>`);
     const doc = openDocument(docx(body));

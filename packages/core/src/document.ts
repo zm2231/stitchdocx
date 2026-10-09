@@ -213,14 +213,18 @@ export class Document {
   }
 
   /** every revision element in the body that decide() can name, with its
-   *  w:id and w:author as written; one id can name several elements */
-  revisions(): Array<{ id: string; author: string | null; name: string }> {
+   *  w:id and w:author as written and its paragraph's address (null outside a
+   *  paragraph); one id can name several elements */
+  revisions(): Array<{ id: string; author: string | null; name: string; addr: Addr | null }> {
     this.assertUsable();
     for (const p of [...pendingElements(this.root)]) if (TRACKED.test(pendingSource(p)!)) materialize(p);
-    const out: Array<{ id: string; author: string | null; name: string }> = [];
+    const out: Array<{ id: string; author: string | null; name: string; addr: Addr | null }> = [];
     for (const rev of allRevisions(this.root)) {
       const id = getAttr(rev, "w:id");
-      if (id !== null) out.push({ id, author: getAttr(rev, "w:author"), name: rev.name });
+      if (id === null) continue;
+      let p = rev.parent;
+      while (p && p.name !== "w:p") p = p.parent;
+      out.push({ id, author: getAttr(rev, "w:author"), name: rev.name, addr: p ? getAttr(p, "w14:paraId") : null });
     }
     return out;
   }

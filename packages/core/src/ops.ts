@@ -121,7 +121,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       refuse(plan, "empty_text");
       continue;
     }
-    const issue = checkSpan(map, op.start, op.end, priorApplied.get(op.addr) ?? [], ownedRevisions);
+    const issue = spanIssue(map, op, priorApplied.get(op.addr) ?? [], ownedRevisions);
     if (issue) {
       refuse(plan, issue.reason);
       continue;
@@ -207,6 +207,18 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
       after: deps.recordText(plan.op.addr, acceptAllView) ?? paragraphText(para, acceptAllView, deps.styles),
     };
   });
+}
+
+// word granularity mutates only the changed tokens, so only those ranges are checked
+function spanIssue(map: SpanMap, op: Extract<Op, { op: "replace" | "delete" }>, prior: Array<{ start: number; end: number }>, owned: ReadonlySet<XElement>): ReturnType<typeof checkSpan> {
+  if (op.op !== "replace" || op.granularity !== "word") return checkSpan(map, op.start, op.end, prior, owned);
+  for (const e of wordEdits(op.expectText, op.text)) {
+    const start = op.start + (e.delStart ?? e.insAt ?? 0);
+    const end = e.delEnd !== undefined ? op.start + e.delEnd : start;
+    const issue = checkSpan(map, start, end, prior, owned);
+    if (issue) return issue;
+  }
+  return null;
 }
 
 function refuse(plan: Plan, reason: NonNullable<Receipt["reason"]>): void {
@@ -395,7 +407,12 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
   const pc = pieceAt(map, at);
   let parent: XElement;
   let index: number;
-  if (pc && pc.start >= at) {
+  const structure = pc ? map.runInfo.get(pc.run)?.structure : null;
+  if (pc && pc.start >= at && structure?.parent && !map.pieces.some((other) => other.end <= at && map.runInfo.get(other.run)?.structure === structure)) {
+    // text inserted at a hyperlink's leading edge sits before the link, as at its trailing edge
+    parent = structure.parent;
+    index = parent.children.indexOf(structure);
+  } else if (pc && pc.start >= at) {
     parent = pc.run.parent!;
     index = parent.children.indexOf(pc.run);
   } else if (pc) {
