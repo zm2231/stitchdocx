@@ -380,6 +380,62 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
     });
   });
 
+  describe("text inserted at a link's leading edge", () => {
+    const NS = `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"`;
+    const EMPTY = `<w:r><w:t/></w:r>`;
+    const cases: Array<[string, string, RegExp]> = [
+      ["a hyperlink that opens with an empty run", `<w:hyperlink ${NS} r:id="r1">${EMPTY}${R("site.me")}</w:hyperlink>`, /Visit <\/w:t><\/w:r><\/w:ins><w:hyperlink /],
+      ["a smartTag that opens with an empty run", `<w:smartTag w:uri="u" w:element="e">${EMPTY}${R("site.me")}</w:smartTag>`, /Visit <\/w:t><\/w:r><\/w:ins><w:smartTag /],
+      ["a smartTag nested at the start of a hyperlink", `<w:hyperlink ${NS} r:id="r1"><w:smartTag w:uri="u" w:element="e">${EMPTY}${R("site")}</w:smartTag>${R(".me")}</w:hyperlink>`, /Visit <\/w:t><\/w:r><\/w:ins><w:hyperlink /],
+    ];
+    for (const [name, structure, placed] of cases) {
+      it(`places it before ${name}`, () => {
+        const body = P("10000001", structure + R(" today"));
+        const { docx: norm } = normalizeDocx(docx(body));
+        const doc = openDocument(norm);
+        const receipts = doc.apply([{ op: "replace", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 0, end: 0, expectText: "", text: "Visit " }], { date: DATE });
+        expect(receipts[0]!.status).toBe("applied");
+        const out = doc.save();
+        expect(new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!))).toMatch(placed);
+        expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+      });
+    }
+  });
+
+  describe("insertParagraphAfter with inheritFormat", () => {
+    const LIST = `<w:pPr><w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:rPr><w:b/></w:rPr></w:pPr>`;
+    const insertedPPr = (out: Uint8Array, addr: string) => {
+      const xml = new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
+      return xml.match(new RegExp(`<w:p w14:paraId="${addr}"[^>]*>(<w:pPr>[\\s\\S]*?</w:pPr>)?(?=<w:(?:ins|r|del)[ >])`))![1] ?? "";
+    };
+    for (const [form, body] of [
+      ["before another paragraph", P("10000001", LIST + R("First")) + P("10000002", R("Next"))],
+      ["at the end of the body", P("10000001", LIST + R("First"))],
+    ] as const) {
+      it(`gives the new paragraph the anchor's properties ${form}`, () => {
+        const { docx: norm } = normalizeDocx(docx(body));
+        const doc = openDocument(norm);
+        const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second", inheritFormat: true }], { date: DATE });
+        expect(receipts[0]!.status).toBe("applied");
+        const out = doc.save();
+        const pPr = insertedPPr(out, receipts[0]!.insertedAddr!);
+        expect(pPr.replace(/<w:pPrChange[\s\S]*<\/w:pPrChange>/, "")).toContain(`<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>`);
+        expect(pPr.replace(/<w:pPrChange[\s\S]*<\/w:pPrChange>/, "")).not.toContain("<w:b/>");
+        expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+        const rejected = openDocument(out);
+        rejected.decide([{ ref: "f", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
+        expect(rejected.projection().map((p) => p.text)).toEqual(body.includes("Next") ? ["First", "Next"] : ["First"]);
+      });
+    }
+
+    it("leaves the new paragraph's properties empty without it", () => {
+      const body = P("10000001", LIST + R("First")) + P("10000002", R("Next"));
+      const { receipts, out } = runOn(body, [{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second" }]);
+      expect(receipts[0]!.status).toBe("applied");
+      expect(insertedPPr(out, receipts[0]!.insertedAddr!)).not.toContain("<w:numPr>");
+    });
+  });
+
   it("lists each revision with its paragraph's address", () => {
     const body = P("10000001", R("Alpha beta")) + P("10000002", R("Gamma"));
     const { docx: norm } = normalizeDocx(docx(body));

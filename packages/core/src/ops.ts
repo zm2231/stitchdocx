@@ -9,6 +9,7 @@ import {
   setAttr,
   textNode,
   type XElement,
+  type XNode,
 } from "@stitchdocx/package-io";
 import { buildSpanMap, checkSpan, pieceAt, type SpanMap } from "./spanmap.js";
 import { attrVal, markRevision, paragraphText, textContent, wordText, type View } from "./projection.js";
@@ -394,6 +395,22 @@ function insertInsEl(deps: ApplyDeps, afterEl: XElement, text: string, author: s
   return ins.attrs.find((a) => a.name === "w:id")!.raw;
 }
 
+/** the outermost hyperlink or smartTag around `run` with no visible text before
+ *  `at`: text inserted at its leading edge sits before it, as at its trailing edge */
+function leadingStructure(map: SpanMap, run: XElement, at: number): XElement | null {
+  let outer: XElement | null = null;
+  for (let cur = run.parent; cur && cur.name !== "w:p"; cur = cur.parent) {
+    if (cur.name !== "w:hyperlink" && cur.name !== "w:smartTag") continue;
+    const within = (r: XElement) => {
+      for (let a = r.parent; a; a = a.parent) if (a === cur) return true;
+      return false;
+    };
+    if (map.pieces.some((o) => o.end > o.start && o.end <= at && within(o.run))) break;
+    outer = cur;
+  }
+  return outer;
+}
+
 /** point insertion at a text offset (word-diff insertions, empty-span replace) */
 function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: string, author: string): string {
   const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
@@ -407,9 +424,8 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
   const pc = pieceAt(map, at);
   let parent: XElement;
   let index: number;
-  const structure = pc ? map.runInfo.get(pc.run)?.structure : null;
-  if (pc && pc.start >= at && structure?.parent && !map.pieces.some((other) => other.end <= at && map.runInfo.get(other.run)?.structure === structure)) {
-    // text inserted at a hyperlink's leading edge sits before the link, as at its trailing edge
+  const structure = pc && pc.start >= at ? leadingStructure(map, pc.run, at) : null;
+  if (structure?.parent) {
     parent = structure.parent;
     index = parent.children.indexOf(structure);
   } else if (pc && pc.start >= at) {
@@ -494,20 +510,8 @@ function applyInsertParagraph(
     const pPr = el("w:pPr");
     const change = newRevisionEl("w:pPrChange", changeId, author, deps.date);
     const saved = el("w:pPr");
-    const anchorPPr = kid(anchor, "w:pPr");
-    for (const c of anchorPPr?.children ?? []) {
-      // the saved state carries the anchor's paragraph properties; mark
-      // formatting, change records and the section break (which belongs to
-      // the anchor and must not be duplicated onto the insert) are excluded
-      if (c.kind === "el" && (c.name === "w:rPr" || c.name === "w:pPrChange" || c.name === "w:sectPr")) continue;
-      const clone = cloneNode(c);
-      saved.children.push(clone);
-      if (clone.kind === "el") clone.parent = saved;
-    }
-    // a copied property may itself carry a revision record (e.g. a
-    // w:sectPrChange nested deeper); records keep their unique ids only on
-    // their original element
-    stripRevisionRecords(saved);
+    for (const c of anchorProperties(anchor)) adopt(saved, c);
+    if (op.inheritFormat) for (const c of anchorProperties(anchor)) adopt(pPr, c);
     change.children.push(saved);
     saved.parent = change;
     pPr.children.push(change);
@@ -523,6 +527,7 @@ function applyInsertParagraph(
     const runId = deps.ids.take();
     ids.push(markId, runId);
     const pPr = el("w:pPr");
+    if (op.inheritFormat) for (const c of anchorProperties(anchor)) adopt(pPr, c);
     markIns = newRevisionEl("w:ins", markId, author, deps.date);
     const rPr = el("w:rPr");
     rPr.children.push(markIns);
@@ -551,6 +556,25 @@ function applyInsertParagraph(
   const addr = deps.paraIds.take();
   setAttr(p, "w14:paraId", addr);
   return { insertedAddr: addr, ids, element: p };
+}
+
+/** copies of the anchor's paragraph properties a new paragraph can carry:
+ *  mark formatting, change records and the section break (which must not be
+ *  duplicated onto the insert) stay with the anchor; a copied property's own
+ *  revision record keeps its unique id only on the original */
+function anchorProperties(anchor: XElement): XNode[] {
+  const holder = el("w:pPr");
+  for (const c of kid(anchor, "w:pPr")?.children ?? []) {
+    if (c.kind === "el" && (c.name === "w:rPr" || c.name === "w:pPrChange" || c.name === "w:sectPr")) continue;
+    adopt(holder, cloneNode(c));
+  }
+  stripRevisionRecords(holder);
+  return [...holder.children];
+}
+
+function adopt(parent: XElement, child: XNode): void {
+  parent.children.push(child);
+  if (child.kind === "el") child.parent = parent;
 }
 
 /**
