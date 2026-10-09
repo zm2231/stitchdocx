@@ -340,8 +340,60 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       const out = doc.save();
       expect(xmlOf(out)).toMatch(/<w:hyperlink [^>]*><w:r><w:t xml:space="preserve">site\.me<\/w:t><\/w:r><\/w:hyperlink>/);
       expect(verifyOutput(norm, out, receipts).ok).toBe(true);
-      const span = runOn(body, [word(before, "Portfolio site.me • c@d.com", "span")]);
-      expect(span.receipts[0]!.reason).toBe("span_crosses_structure");
+    });
+
+    it("replaces a whole span that reaches into a link, deleting the link text in place and adding the new text outside it", () => {
+      const before = "Profile site.me • a@b.com";
+      const after = "Portfolio site.me • c@d.com";
+      const body = P("10000001", R("Profile ", "<w:rPr><w:b/></w:rPr>") + LINK("site.me") + R(" • a@b.com"));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, after, "span")], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(receipts[0]!.after).toBe(after);
+      const out = doc.save();
+      const xml = xmlOf(out);
+      expect(xml).toMatch(/<w:hyperlink [^>]*><w:del [^>]*><w:r><w:delText xml:space="preserve">site\.me<\/w:delText><\/w:r><\/w:del><\/w:hyperlink>/);
+      expect(xml).toMatch(/<\/w:del><w:ins [^>]*><w:r><w:rPr><w:b\/><\/w:rPr><w:t xml:space="preserve">Portfolio site\.me • c@d\.com<\/w:t><\/w:r><\/w:ins><\/w:p>/);
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+      doc.decide([{ ref: "f", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
+      expect(doc.projection()[0]!.text).toBe(before);
+    });
+
+    it("rewrites a contact line whose link text changes, as a member's header edit needed", () => {
+      const before = "www.linkedin.com/in/sample• sample@example.com • (555) 010-0199 ";
+      const after = "Austin, TX | sample@example.com | (555) 010-0199 | linkedin.com/in/sample";
+      const body = P("10000001", LINK("www.linkedin.com/in/sample") + R("• sample@example.com • (555) 010-0199 "));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, after)], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(receipts[0]!.after).toBe(after);
+      expect(verifyOutput(norm, doc.save(), receipts).ok).toBe(true);
+      doc.decide([{ ref: "f", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
+      expect(doc.projection()[0]!.text).toBe(before);
+    });
+
+    it("deletes a whole line that holds a link", () => {
+      const before = "site.me • a@b.com";
+      const body = P("10000001", LINK("site.me") + R(" • a@b.com"));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([{ op: "delete", ref: "f", author: "Reviewer A [f]", addr: "10000001", start: 0, end: before.length, expectText: before }], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(receipts[0]!.changeIds).toHaveLength(2);
+      expect(doc.projection()[0]!.text).toBe("");
+      expect(verifyOutput(norm, doc.save(), receipts).ok).toBe(true);
+      doc.decide([{ ref: "f", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
+      expect(doc.projection()[0]!.text).toBe(before);
+    });
+
+    it("still refuses a span that reaches into a field result inside a link", () => {
+      const NS = `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"`;
+      const before = "See the portal";
+      const body = P("10000001", R("See ") + `<w:hyperlink ${NS} r:id="r1"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${R("the portal")}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>`);
+      const { receipts } = runOn(body, [word(before, "Read the docs", "span")]);
+      expect(receipts[0]!.reason).toBe("span_crosses_structure");
     });
 
     it("removes link text and adds text before the link without moving it into the link", () => {
@@ -395,12 +447,14 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     });
 
-    it("still refuses a changed token that straddles the link boundary", () => {
+    it("edits a changed token that straddles the link boundary on both sides of it", () => {
       const before = "site.me• a@b.com";
-      const body = P("10000001", LINK("site.me") + R("• a@b.com"));
-      const { receipts } = runOn(body, [word(before, "site.ca/ a@b.com")]);
-      expect(receipts[0]!.status).toBe("refused");
-      expect(receipts[0]!.reason).toBe("span_crosses_structure");
+      const { docx: norm } = normalizeDocx(docx(P("10000001", LINK("site.me") + R("• a@b.com"))));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, "site.ca/ a@b.com")], { date: DATE });
+      expect(receipts[0]!.status).toBe("applied");
+      expect(doc.projection()[0]!.text).toBe("site.ca/ a@b.com");
+      expect(verifyOutput(norm, doc.save(), receipts).ok).toBe(true);
     });
   });
 

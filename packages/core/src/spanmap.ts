@@ -1,6 +1,6 @@
 // Span map: the paragraph's visible text tiled into char pieces, each tied to
 // the run that produced it, with the ancestry metadata the refusal checks need
-// (revision, hyperlink/smartTag structure, inline content control, field,
+// (revision, inline content control, field,
 // locked content, tracked rows).
 // Text coordinates are what Word reads (wordText), the same space the
 // projection and the contract's offsets live in.
@@ -26,8 +26,6 @@ export interface SpanPiece {
 export interface RunInfo {
   /** nearest enclosing revision element (any author), or null */
   rev: XElement | null;
-  /** nearest enclosing w:hyperlink / w:smartTag, or null */
-  structure: XElement | null;
   /** a w:sdt sits strictly between the run and its paragraph */
   inlineSdt: boolean;
   /** the run's row is itself a tracked insertion or deletion */
@@ -89,16 +87,14 @@ function lockedInside(paragraph: XElement, el: XElement): boolean {
 
 function ancestry(run: XElement, paragraph: XElement): RunInfo {
   let rev: XElement | null = null;
-  let structure: XElement | null = null;
   let inlineSdt = false;
   let cur: XElement | null = run.parent;
   while (cur && cur !== paragraph) {
     if (!rev && (cur.name === "w:ins" || cur.name === "w:del" || cur.name === "w:moveFrom" || cur.name === "w:moveTo")) rev = cur;
-    if (!structure && (cur.name === "w:hyperlink" || cur.name === "w:smartTag")) structure = cur;
     if (cur.name === "w:sdt") inlineSdt = true;
     cur = cur.parent;
   }
-  return { rev, structure, inlineSdt, trackedRow: trackedRowOf(paragraph) };
+  return { rev, inlineSdt, trackedRow: trackedRowOf(paragraph) };
 }
 
 /** true when the paragraph's row carries a row-level tracked change */
@@ -141,7 +137,6 @@ export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Ar
   let hasAlternate = false;
   let hasMath = false;
   let hasTrackedRow = false;
-  const structures = new Set<XElement | null>();
   const parents = new Set<XElement | null>();
   for (const pc of covered) {
     const info = map.runInfo.get(pc.run)!;
@@ -151,17 +146,19 @@ export function checkSpan(map: SpanMap, start: number, end: number, priorOps: Ar
     if (info.inlineSdt) hasSdt = true;
     if (pc.lock === "alternate") hasAlternate = true;
     if (pc.lock === "math") hasMath = true;
-    structures.add(info.structure);
     parents.add(pc.run.parent);
   }
   if (hasRev || hasTrackedRow) return { reason: "span_overlaps_revision" };
   for (const pr of priorOps) {
     if (start < pr.end && pr.start < end) return { reason: "span_overlaps_prior_op" };
   }
-  // mutation safety: every covered run must share one parent (an unmodelled
-  // inline wrapper such as w:customXml would otherwise be partially deleted).
-  // Office math and AlternateContent are structure the engine lists but never rewrites.
-  if (parents.size > 1 || structures.size > 1 || hasAlternate || hasMath) return { reason: "span_crosses_structure" };
+  // mutation safety: covered runs may sit in different hyperlinks or smart
+  // tags of one container, since a deletion is then segmented per parent;
+  // any other wrapper (w:customXml, a field result, a content control) must
+  // hold the whole span. Office math and AlternateContent are structure the
+  // engine lists but never rewrites.
+  const linkSegmented = new Set(covered.map((pc) => outsideLinks(pc.run).parent)).size === 1 && !hasField && !hasSdt;
+  if ((parents.size > 1 && !linkSegmented) || hasAlternate || hasMath) return { reason: "span_crosses_structure" };
   if (hasField) return { reason: "span_in_field" };
   if (hasSdt) return { reason: "span_in_content_control" };
   if (start === end) {
@@ -187,4 +184,12 @@ export function pieceAt(map: SpanMap, offset: number): SpanPiece | null {
     if (pc.start >= offset) return pc;
   }
   return null;
+}
+
+/** `el` or its outermost w:hyperlink / w:smartTag ancestor, below which a
+ *  deletion is segmented per parent */
+export function outsideLinks(el: XElement): XElement {
+  let cur = el;
+  while (cur.parent && (cur.parent.name === "w:hyperlink" || cur.parent.name === "w:smartTag")) cur = cur.parent;
+  return cur;
 }

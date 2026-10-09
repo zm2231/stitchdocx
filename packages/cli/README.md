@@ -65,7 +65,12 @@ Text that Word does not render or will discard is never a valid edit target:
 complex-field instructions are omitted from `text`, field results (including
 `w:fldSimple` content and everything under a TOC's separate) are listed but
 refused with `span_in_field`, and AlternateContent branches and office math
-(`m:oMath`) are listed but refused with `span_crosses_structure`. Text Word hides is not
+(`m:oMath`) are listed but refused with `span_crosses_structure`. A span may
+reach into and out of hyperlinks and smart tags: its deletion is split into one
+`w:del` per parent, and a `span` replacement's new text goes after the deleted text, outside the link,
+formatted like the first deleted run outside it. A span that reaches into any
+other wrapper (`w:customXml`, a field result, a content control) is refused
+with `span_crosses_structure`. Text Word hides is not
 listed: a run's own `w:vanish` decides, else the paragraph and character
 style chains combine by exclusive or, else `docDefaults` (`w:specVanish` and
 `w:webHidden` text prints in Word and is listed). Engine insertions stay

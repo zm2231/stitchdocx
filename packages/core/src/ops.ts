@@ -11,7 +11,7 @@ import {
   type XElement,
   type XNode,
 } from "@stitchdocx/package-io";
-import { buildSpanMap, checkSpan, pieceAt, type SpanMap } from "./spanmap.js";
+import { buildSpanMap, checkSpan, outsideLinks, pieceAt, type SpanMap } from "./spanmap.js";
 import { attrVal, markRevision, paragraphText, textContent, wordText, type View } from "./projection.js";
 import {
   makeRun,
@@ -312,11 +312,11 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, validated?: Wo
     }
     return ids;
   }
-  // span granularity: one deletion (possibly segmented around bookmarks) + one
-  // insertion right after the last deleted segment
+  // span granularity: one deletion (possibly segmented around bookmarks and
+  // links) + one insertion right after it
   const del = applyDeletion(deps, para, op.start, op.end, op.author);
-  if (del.lastDelEl) {
-    const insId = insertInsEl(deps, del.lastDelEl, op.text, op.author, del.firstRunPr);
+  if (del.insertAfter) {
+    const insId = insertInsEl(deps, del.insertAfter, op.text, op.author, del.insertRunPr);
     return [...del.ids, insId];
   }
   // pure insertion (empty span)
@@ -325,12 +325,16 @@ function applySpanOp(deps: ApplyDeps, para: XElement, op: SpanOp, validated?: Wo
 
 interface DeletionResult {
   ids: string[];
-  firstRunPr: XElement | null;
-  lastDelEl: XElement | null;
+  /** formatting for replacement text: the first deleted run, or the first one
+   *  outside a link when the deletion reached into one */
+  insertRunPr: XElement | null;
+  /** where replacement text goes: after the last deleted segment, or after
+   *  its link when the deletion also covered text outside it */
+  insertAfter: XElement | null;
 }
 
 function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: number, author: string): DeletionResult {
-  if (end === start) return { ids: [], firstRunPr: null, lastDelEl: null };
+  if (end === start) return { ids: [], insertRunPr: null, insertAfter: null };
   // rebuild the map after each split: splitting changes the tree (text is
   // preserved, so offsets stay valid), and stale piece references would
   // split already-split runs and corrupt the paragraph
@@ -342,33 +346,38 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
   const covered = map.pieces.filter((pc) => pc.start >= start && pc.end <= end);
   const runs: XElement[] = [];
   for (const pc of covered) if (!runs.includes(pc.run)) runs.push(pc.run);
-  if (runs.length === 0) return { ids: [], firstRunPr: null, lastDelEl: null };
-  // defense in depth (checkSpan already gates this): refuse to mutate when the
-  // covered runs do not share one parent — partial deletions are forbidden
-  if (new Set(runs.map((r) => r.parent)).size > 1) {
-    throw new Error("mutation safety: covered runs span multiple parents");
+  if (runs.length === 0) return { ids: [], insertRunPr: null, insertAfter: null };
+  // defense in depth (checkSpan already gates this): covered runs may differ
+  // only by the hyperlinks or smart tags that wrap them
+  if (new Set(runs.map((r) => outsideLinks(r).parent)).size > 1) {
+    throw new Error("mutation safety: covered runs span multiple containers");
   }
-  const firstRunPr = deps.styles.insertedRunPr(runs[0]!, para);
+  const segmented = new Set(runs.map((r) => r.parent)).size > 1;
+  const formatRun = segmented ? runs.find((r) => outsideLinks(r) === r) ?? runs[0]! : runs[0]!;
+  const insertRunPr = deps.styles.insertedRunPr(formatRun, para);
 
-  // contiguous sibling segments (bookmark/comment markers between runs split
-  // the deletion into several w:del elements; everything shares one parent —
-  // the structure check guarantees it)
-  const parent = runs[0]!.parent!;
+  // contiguous sibling segments per parent: bookmark/comment markers between
+  // runs, and the edges of a hyperlink or smart tag, split the deletion into
+  // several w:del elements, each in the parent of its runs
   const coveredSet = new Set(runs);
   const segments: XElement[][] = [];
-  let current: XElement[] = [];
-  for (const c of parent.children) {
-    if (c.kind === "el" && coveredSet.has(c)) current.push(c);
-    else if (current.length) {
-      segments.push(current);
-      current = [];
+  for (const parent of new Set(runs.map((r) => r.parent!))) {
+    let current: XElement[] = [];
+    for (const c of parent.children) {
+      if (c.kind === "el" && coveredSet.has(c)) current.push(c);
+      else if (current.length) {
+        segments.push(current);
+        current = [];
+      }
     }
+    if (current.length) segments.push(current);
   }
-  if (current.length) segments.push(current);
+  segments.sort((a, b) => runs.indexOf(a[0]!) - runs.indexOf(b[0]!));
 
   const delEls: XElement[] = [];
   for (let i = segments.length - 1; i >= 0; i--) {
     const seg = segments[i]!;
+    const parent = seg[0]!.parent!;
     const rev = newRevisionEl("w:del", deps.ids.take(), author, deps.date);
     const segStart = parent.children.indexOf(seg[0]!);
     parent.children.splice(segStart, seg.length, rev);
@@ -383,7 +392,8 @@ function applyDeletion(deps: ApplyDeps, para: XElement, start: number, end: numb
       if (d.name === "w:t") renameEl(d, "w:delText"); // w:t lives inside runs
     }
   }
-  return { ids: delEls.map((d) => d.attrs.find((a) => a.name === "w:id")!.raw), firstRunPr, lastDelEl: delEls[delEls.length - 1]! };
+  const lastDel = delEls[delEls.length - 1]!;
+  return { ids: delEls.map((d) => d.attrs.find((a) => a.name === "w:id")!.raw), insertRunPr, insertAfter: segmented ? outsideLinks(lastDel) : lastDel };
 }
 
 export function* descendantsOf(root: XElement): Generator<XElement> {
