@@ -55,7 +55,7 @@ export type Op =
       text: string;
       scope?: "paragraph" | "table";
       /** the new paragraph takes this paragraph's properties (style, list, spacing) and
-       *  its first run's character formatting, as pressing Enter after it in Word does */
+       *  the character formatting of its first run outside a link, as pressing Enter after it in Word does */
       formatFrom?: Addr;
     };
 

@@ -88,6 +88,7 @@ export function executeApply(deps: ApplyDeps, ops: Op[]): Receipt[] {
     if (op.op === "insertParagraphAfter") {
       if (!op.text || op.text.trim() === "") refuse(plan, "empty_text");
       else if (op.formatFrom !== undefined && (!deps.paraByAddr.has(op.formatFrom) || deps.addressable(op.formatFrom) === "unlisted")) refuse(plan, "addr_not_found");
+      else if (op.formatFrom !== undefined && deps.addressable(op.formatFrom) === "merged") refuse(plan, "paragraph_not_editable");
       else if (op.scope === "table" && !hasAncestor(para, "w:tbl")) refuse(plan, "addr_not_found");
       else if (op.scope !== "table" && inPlainTextControl(para)) refuse(plan, "insert_in_plain_text_control");
       else if (op.scope !== "table" && nextBlockSibling(para)?.name !== "w:p" && markRevision(para)) {
@@ -542,7 +543,7 @@ function applyInsertParagraph(
 
   const runId = ids[ids.length - 1]!;
   const runIns = newRevisionEl("w:ins", runId, author, deps.date);
-  const anchorRunPr = deps.styles.insertedRunPr(firstRun(formatSource ?? anchor), p);
+  const anchorRunPr = deps.styles.insertedRunPr(formatSource ? firstPlainRun(formatSource) : firstRun(anchor), p);
   const run = makeRun(anchorRunPr, textToRunChildren(op.text));
   runIns.children.push(run);
   run.parent = runIns;
@@ -616,6 +617,23 @@ function firstRun(p: XElement): XElement | null {
     if (c.kind === "el" && c.name === "w:r") return c;
   }
   return null;
+}
+
+/** the first run of ordinary text, through inline wrappers such as smartTag or
+ *  customXml: link, deleted and moved-away text would carry formatting that
+ *  misrepresents plain inserted text */
+function firstPlainRun(p: XElement): XElement | null {
+  const skip = new Set(["w:hyperlink", "w:del", "w:moveFrom", "w:pPr", "mc:AlternateContent", "m:oMath", "m:oMathPara"]);
+  const visit = (node: XElement): XElement | null => {
+    for (const c of node.children) {
+      if (c.kind !== "el" || skip.has(c.name)) continue;
+      if (c.name === "w:r") return c;
+      const found = visit(c);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(p);
 }
 
 /**

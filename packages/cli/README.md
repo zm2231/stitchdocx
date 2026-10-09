@@ -87,9 +87,10 @@ needs a non-empty `author`. Ops (all require `flagId`, `author`, `addr`):
 - `{ "op": "insertParagraphAfter", "addr", "text", "scope"?, "formatFrom"? }`
   — a new tracked-inserted paragraph after `addr` (or after the containing
   table with `"scope": "table"`). With `"formatFrom": "<addr>"` it takes that
-  paragraph's properties (style, list, spacing) and its first run's character
-  formatting, as pressing Enter after it in Word does; an address that is not
-  listed refuses with `addr_not_found`.
+  paragraph's properties (style, list, spacing) and the character formatting
+  of its first run outside a link, as pressing Enter after it in Word does;
+  a merged record refuses with `paragraph_not_editable` and an address that is
+  not listed refuses with `addr_not_found`.
 
 Spans are in the paragraph's original text coordinates and must match
 `expectText` exactly — address only records listed with `editable: true`

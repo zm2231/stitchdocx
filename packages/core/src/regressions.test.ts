@@ -464,6 +464,38 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       expect(verifyOutput(norm, out, receipts).ok).toBe(true);
     });
 
+    const NS = `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"`;
+    const BOLD = `<w:r><w:rPr><w:b/></w:rPr><w:t>Role</w:t></w:r>`;
+    for (const [name, source, copied] of [
+      ["a smartTag", `<w:smartTag w:uri="u" w:element="e">${BOLD}</w:smartTag>`, true],
+      ["a customXml wrapper", `<w:customXml w:element="e">${BOLD}</w:customXml>`, true],
+      ["a hyperlink, whose link formatting stays with the link", `<w:hyperlink ${NS} r:id="r1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>site.me</w:t></w:r></w:hyperlink>${BOLD}`, true],
+      ["only a hyperlink", `<w:hyperlink ${NS} r:id="r1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>site.me</w:t></w:r></w:hyperlink>`, false],
+    ] as const) {
+      it(`takes character formatting from the source's first plain run inside ${name}`, () => {
+        const body = P("10000001", source) + P("10000002", R("Bullet")) + P("10000003", R("Next"));
+        const { docx: norm } = normalizeDocx(docx(body));
+        const doc = openDocument(norm);
+        const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000002", text: "New role", formatFrom: "10000001" }], { date: DATE });
+        expect(receipts[0]!.status).toBe("applied");
+        const out = doc.save();
+        const xml = new TextDecoder().decode(entryBytes(readPackage(out).get("word/document.xml")!));
+        const inserted = xml.match(/<w:ins [^>]*><w:r>(<w:rPr>[\s\S]*?<\/w:rPr>)?<w:t xml:space="preserve">New role/)!;
+        expect(inserted[1] ?? "").toBe(copied ? "<w:rPr><w:b/></w:rPr>" : "");
+        expect(xml).not.toMatch(/<w:ins [^>]*><w:r><w:rPr><w:rStyle w:val="Hyperlink"\/>/);
+        expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+      });
+    }
+
+    it("refuses a formatFrom that names a merged record, as an op address does", () => {
+      const merged = P("10000001", `<w:pPr><w:rPr><w:del w:id="9" w:author="Client" w:date="${DATE}"/></w:rPr></w:pPr>` + R("Gone mark")) + P("10000002", R("Joined"));
+      const doc = openDocument(normalizeDocx(docx(merged + P("10000003", R("Anchor")))).docx);
+      const listed = doc.projection().find((p) => !p.editable);
+      expect(listed).toBeDefined();
+      const receipts = doc.apply([{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000003", text: "New", formatFrom: listed!.addr }], { date: DATE });
+      expect(receipts[0]).toMatchObject({ status: "refused", reason: "paragraph_not_editable" });
+    });
+
     it("refuses a formatFrom that names no paragraph", () => {
       const body = P("10000001", LIST + R("First")) + P("10000002", R("Next"));
       const { receipts } = runOn(body, [{ op: "insertParagraphAfter", ref: "f", author: "Reviewer A [f]", addr: "10000001", text: "Second", formatFrom: "7FFFFFFE" }]);
