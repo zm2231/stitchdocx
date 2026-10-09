@@ -475,7 +475,7 @@ function applyPointInsertion(deps: ApplyDeps, para: XElement, at: number, text: 
     index = parent.children.indexOf(rev) + (pc && pc.start < at ? 1 : 0);
   }
   const sameParent = map.pieces.filter((o) => o.end > o.start && o.run.parent === parent && !o.inFieldResult);
-  const replaced = replacedFrom === undefined ? undefined : sameParent.find((o) => o.start >= replacedFrom && o.end <= at);
+  const replaced = replacedFrom === undefined ? undefined : sameParent.find((o) => o.end > replacedFrom && o.start < at);
   const formatRun = replaced?.run ?? sameParent.filter((o) => o.end <= at).at(-1)?.run ?? sameParent.find((o) => o.start >= at)?.run ?? null;
   const ins = newRevisionEl("w:ins", deps.ids.take(), author, deps.date);
   const run = makeRun(deps.styles.insertedRunPr(formatRun, para), textToRunChildren(text));

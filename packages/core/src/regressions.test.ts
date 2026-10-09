@@ -470,6 +470,20 @@ A [f]" w:date="${DATE}">` + R("wrapped author text") + `</w:ins>` +
       expect(doc.projection()[0]!.text).toBe(before);
     });
 
+    it("formats a replacement that starts inside a run like that first replaced run", () => {
+      const before = "A Present B";
+      const BOLD = "<w:rPr><w:b/></w:rPr>";
+      const body = P("10000001", R("A Pre", BOLD) + R("sent", "<w:rPr><w:i/></w:rPr>") + R(" B", BOLD));
+      const { docx: norm } = normalizeDocx(docx(body));
+      const doc = openDocument(norm);
+      const receipts = doc.apply([word(before, "A May 2025 B")], { date: DATE });
+      const out = doc.save();
+      expect(xmlOf(out)).toMatch(/<w:ins [^>]*><w:r><w:rPr><w:b\/><\/w:rPr><w:t xml:space="preserve">May 2025/);
+      expect(verifyOutput(norm, out, receipts).ok).toBe(true);
+      doc.decide([{ ref: "f", changeIds: receipts[0]!.changeIds, decision: "reject" }]);
+      expect(doc.projection()[0]!.text).toBe(before);
+    });
+
     it("formats text added before a link like the plain text, and text added inside a link like the link", () => {
       const STYLED = (text: string) => `<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="r1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>${text}</w:t></w:r></w:hyperlink>`;
       const body = P("10000001", STYLED("site.me") + R(" today", "<w:rPr><w:b/></w:rPr>"));
