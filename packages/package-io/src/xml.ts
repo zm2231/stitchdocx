@@ -1,6 +1,6 @@
 // Byte-faithful XML tree for OOXML parts.
 //
-// Design invariants (D1 decision, see research/):
+// Design invariants:
 // 1. serialize(parse(s)) === s for any well-formed XML part. Every node keeps
 //    its raw source form (entities, attribute order, quoting, self-closing
 //    form, whitespace inside tags), so untouched subtrees re-serialize

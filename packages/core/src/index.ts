@@ -1,4 +1,4 @@
-// stitchdocx core — public engine API (see research/04-engine-api-adjudication.md)
+// stitchdocx core: the public engine API
 export { openDocument, normalizeDocx, finalizeDocx, acceptAllDocx, Document, isIsoDate } from "./document.js";
 export { verifyOutput } from "./verify.js";
 export { DOCUMENT_LIMITS } from "./limits.js";

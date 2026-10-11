@@ -1,4 +1,4 @@
-// Public contract types (see research/04-engine-api-adjudication.md).
+// Public contract types.
 
 export type Addr = string; // w14:paraId, 8 hex digits, < 0x80000000
 
