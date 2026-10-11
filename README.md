@@ -35,4 +35,6 @@ The acceptance gate itself:
 DOCX_ACCEPTANCE_DIR=… pnpm verify:acceptance
 ```
 
-Design notes and research artifacts live in `research/` (gitignored).
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md). Free for noncommercial use. For commercial use, contact the author.

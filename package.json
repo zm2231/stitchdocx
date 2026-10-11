@@ -1,7 +1,7 @@
 {
   "name": "stitchdocx",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "description": "DOCX (OOXML) engine: lossless package IO, tracked-change operations with receipts, and a redline adapter CLI.",
   "scripts": {
